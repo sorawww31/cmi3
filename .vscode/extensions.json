@@ -1,0 +1,27 @@
+{
+    "recommendations": [
+        // Development
+        "github.copilot",
+        "usernamehw.errorlens",
+        "gruntfuggly.todo-tree",
+        "ibm.output-colorizer",
+        "editorconfig.editorconfig",
+        "mosapride.zenkaku",
+        "ionutvmi.path-autocomplete",
+        // python
+        "ms-python.python",
+        "charliermarsh.ruff",
+        "ms-python.mypy-type-checker",
+        "njpwerner.autodocstring",
+        "ms-toolsai.jupyter",
+        "ms-toolsai.jupyter-keymap",
+        "marimo-team.vscode-marimo",
+        // Markdown
+        "yzane.markdown-pdf",
+        // CSV
+        "janisdd.vscode-edit-csv",
+        "mechatroner.rainbow-csv",
+        // Git
+        "mhutchie.git-graph"
+    ]
+}

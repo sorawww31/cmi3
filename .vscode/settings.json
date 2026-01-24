@@ -1,0 +1,29 @@
+{
+  // === Global Settings ===
+  "editor.formatOnSave": true,
+  "editor.formatOnPaste": false,
+  "editor.formatOnType": false,
+  "editor.formatOnSaveMode": "file",
+  "editor.codeActionsOnSave": {
+    "source.fixAll": "explicit",
+    "source.organizeImports": "explicit",
+    "source.organizeImports.ruff": "explicit"
+  },
+  // === Python Settings (Ruff) ===
+  "[python]": {
+    "editor.formatOnSave": true,
+    "editor.formatOnPaste": false,
+    "editor.formatOnType": false,
+    "editor.formatOnSaveMode": "file",
+    "editor.defaultFormatter": "charliermarsh.ruff",
+    "editor.codeActionsOnSave": {
+      "source.fixAll": "explicit",
+      "source.organizeImports": "explicit",
+      "source.organizeImports.ruff": "explicit"
+    }
+  },
+  // === Mypy Settings ===
+  "mypy-type-checker.args": [
+    "--ignore-missing-imports"
+  ]
+}

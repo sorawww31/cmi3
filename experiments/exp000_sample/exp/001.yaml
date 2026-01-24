@@ -1,0 +1,8 @@
+# Full training experiment
+defaults:  
+  - default@_here_  # defaultの値を設定してから上書きする
+
+seed: 634
+folds: [0, 1, 2, 3, 4]
+epochs: 30
+model_name: lstm
