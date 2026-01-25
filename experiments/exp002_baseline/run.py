@@ -242,14 +242,6 @@ def main(cfg: Config) -> None:
         )
         all_fold_scores.append(results["best_score"])
 
-        # Log to wandb
-        wandb.log(
-            {
-                f"fold_{fold}/best_score": results["best_score"],
-                f"fold_{fold}/best_epoch": results["best_epoch"],
-            }
-        )
-
     # Summary
     mean_score = np.mean(all_fold_scores)
     std_score = np.std(all_fold_scores)

@@ -28,10 +28,10 @@ class ExpConfig:
     dropout: float = 0.3
 
     # Training
-    epochs: int = 30
+    epochs: int = 100
     learning_rate: float = 0.001
     weight_decay: float = 0.01
-    patience: int = 5
+    patience: int = 10
 
     # Optimizer: adam, adamw, radam_schedule_free
     optimizer_name: str = "radam_schedule_free"

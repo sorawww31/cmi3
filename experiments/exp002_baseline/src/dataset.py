@@ -1,6 +1,10 @@
 """
 Dataset module for CMI Behavior Detection competition.
 Handles loading and preprocessing of sensor data sequences.
+
+Memory-optimized version:
+- Pre-converts all sequences to NumPy arrays (discards DataFrame)
+- Uses sequence index mapping for O(1) access
 """
 
 from pathlib import Path
@@ -66,91 +70,112 @@ def load_train_data(input_dir: Path | str) -> tuple[pd.DataFrame, pd.DataFrame]:
     return train_df, demo_df
 
 
-def get_sequence_data(
-    df: pd.DataFrame,
-    sequence_id: int,
-    sensor_cols: list[str] = ALL_SENSOR_COLS,
-) -> np.ndarray:
-    """指定されたシーケンスIDのセンサーデータを取得"""
-    seq_df = df[df["sequence_id"] == sequence_id]
-    return seq_df[sensor_cols].values.astype(np.float32)
-
-
 def pad_sequence(
     data: np.ndarray,
     max_length: int,
     pad_value: float = 0.0,
 ) -> np.ndarray:
-    """シーケンスをmax_lengthにパディング（または切り詰め）"""
+    """シーケンスをmax_lengthにパディング（前方パディング）または切り詰め"""
     seq_len, n_features = data.shape
 
     if seq_len >= max_length:
-        return data[:max_length]
+        # 長い場合は末尾を使用（最新のデータを保持）
+        return data[-max_length:]
 
+    # 前方パディング: [PAD, PAD, ..., data]
     padded = np.full((max_length, n_features), pad_value, dtype=np.float32)
-    padded[:seq_len] = data
+    padded[-seq_len:] = data  # データを末尾に配置
     return padded
 
 
+def preconvert_sequences(
+    df: pd.DataFrame,
+    sequence_ids: list[int],
+    sensor_cols: list[str],
+    max_length: int,
+) -> tuple[np.ndarray, dict[int, dict]]:
+    """
+    DataFrameから全シーケンスをNumPy配列に事前変換（メモリ効率化）
+
+    Args:
+        df: センサーデータを含むDataFrame
+        sequence_ids: 使用するシーケンスIDのリスト
+        sensor_cols: 使用するセンサーカラム
+        max_length: パディング後のシーケンス長
+
+    Returns:
+        data_array: (n_sequences, max_length, n_features) のNumPy配列
+        metadata: シーケンスIDをキーとするメタデータ辞書
+    """
+    n_sequences = len(sequence_ids)
+    n_features = len(sensor_cols)
+
+    # 事前にメモリを確保
+    data_array = np.zeros((n_sequences, max_length, n_features), dtype=np.float32)
+    metadata = {}
+
+    # sequence_idでグループ化して効率的にアクセス
+    grouped = df.groupby("sequence_id")
+
+    for idx, seq_id in enumerate(sequence_ids):
+        if seq_id in grouped.groups:
+            seq_df = grouped.get_group(seq_id)
+            seq_data = seq_df[sensor_cols].values.astype(np.float32)
+
+            # 欠損値を0で埋める
+            seq_data = np.nan_to_num(seq_data, nan=0.0)
+
+            # パディング
+            seq_data = pad_sequence(seq_data, max_length)
+            data_array[idx] = seq_data
+
+            # メタデータを保存
+            first_row = seq_df.iloc[0]
+            metadata[seq_id] = {
+                "gesture": first_row.get("gesture", None),
+                "subject": first_row.get("subject", None),
+                "sequence_type": first_row.get("sequence_type", None),
+                "idx": idx,  # 配列内のインデックス
+            }
+
+    return data_array, metadata
+
+
 class CMIDataset(Dataset):
-    """CMI Behavior Detection用のPyTorch Dataset"""
+    """
+    CMI Behavior Detection用のPyTorch Dataset（メモリ最適化版）
+
+    DataFrameを保持せず、事前変換されたNumPy配列を使用
+    """
 
     def __init__(
         self,
-        df: pd.DataFrame,
+        data_array: np.ndarray,
         sequence_ids: list[int],
-        max_length: int = 500,
-        sensor_cols: Optional[list[str]] = None,
+        metadata: dict[int, dict],
         is_train: bool = True,
     ):
         """
         Args:
-            df: センサーデータを含むDataFrame
+            data_array: (n_sequences, max_length, n_features) のNumPy配列
             sequence_ids: 使用するシーケンスIDのリスト
-            max_length: パディング後のシーケンス長
-            sensor_cols: 使用するセンサーカラム（Noneの場合はIMUのみ）
+            metadata: シーケンスIDをキーとするメタデータ辞書
             is_train: 訓練モードかどうか
         """
-        self.df = df
+        self.data_array = data_array
         self.sequence_ids = sequence_ids
-        self.max_length = max_length
-        self.sensor_cols = sensor_cols if sensor_cols else IMU_COLS
+        self.metadata = metadata
         self.is_train = is_train
-
-        # シーケンスごとのメタデータを事前に取得
-        self.metadata = self._prepare_metadata()
-
-    def _prepare_metadata(self) -> dict:
-        """各シーケンスのメタデータを準備"""
-        metadata = {}
-        for seq_id in self.sequence_ids:
-            seq_df = self.df[self.df["sequence_id"] == seq_id]
-            if len(seq_df) > 0:
-                first_row = seq_df.iloc[0]
-                metadata[seq_id] = {
-                    "gesture": first_row.get("gesture", None),
-                    "subject": first_row.get("subject", None),
-                    "sequence_type": first_row.get("sequence_type", None),
-                }
-        return metadata
 
     def __len__(self) -> int:
         return len(self.sequence_ids)
 
     def __getitem__(self, idx: int) -> dict:
         seq_id = self.sequence_ids[idx]
+        seq_idx = self.metadata[seq_id]["idx"]
 
-        # センサーデータ取得
-        data = get_sequence_data(self.df, seq_id, self.sensor_cols)
-
-        # 欠損値を0で埋める
-        data = np.nan_to_num(data, nan=0.0)
-
-        # パディング
-        data = pad_sequence(data, self.max_length)
-
-        # (seq_len, n_features) -> (n_features, seq_len) for Conv1D
-        # または (seq_len, n_features) のままLSTMへ
+        # NumPy配列から直接取得（O(1)アクセス）
+        data = self.data_array[seq_idx]
 
         result = {
             "sequence_id": seq_id,
@@ -178,19 +203,43 @@ def create_dataloaders(
     sensor_cols: Optional[list[str]] = None,
     num_workers: int = 4,
 ) -> tuple:
-    """訓練・検証用のDataLoaderを作成"""
+    """
+    訓練・検証用のDataLoaderを作成（メモリ最適化版）
+
+    改善点:
+    - 全シーケンスをNumPy配列に事前変換（O(1)アクセス）
+    - DataFrameへの参照を解放
+
+    注意: fit_transformはtrainのみ、transformはvalに適用（データリーク防止）
+    """
     from torch.utils.data import DataLoader
 
-    preprocessor = Preprocessor()
-    train_df = df[df["sequence_id"].isin(train_ids)].copy()
-    val_df = df[df["sequence_id"].isin(val_ids)].copy()
-    train_df = preprocessor.fit_transform(train_df)
-    val_df = preprocessor.transform(val_df)
+    if sensor_cols is None:
+        sensor_cols = IMU_COLS
 
-    train_dataset = CMIDataset(
-        train_df, train_ids, max_length, sensor_cols, is_train=True
+    # 1. train/valデータを分離
+    train_df = df[df["sequence_id"].isin(train_ids)]
+    val_df = df[df["sequence_id"].isin(val_ids)]
+
+    # 2. 前処理: trainでfit、valはtransformのみ（データリーク防止）
+    preprocessor = Preprocessor()
+    train_df_processed = preprocessor.fit_transform(train_df)
+    val_df_processed = preprocessor.transform(val_df)
+
+    # 3. 前処理済みデータをNumPy配列に変換
+    train_data, train_metadata = preconvert_sequences(
+        train_df_processed, train_ids, sensor_cols, max_length
     )
-    val_dataset = CMIDataset(val_df, val_ids, max_length, sensor_cols, is_train=True)
+    val_data, val_metadata = preconvert_sequences(
+        val_df_processed, val_ids, sensor_cols, max_length
+    )
+
+    # 4. DataFrameへの参照を解放（メモリ節約）
+    del train_df, val_df, train_df_processed, val_df_processed
+
+    # 5. Dataset作成
+    train_dataset = CMIDataset(train_data, train_ids, train_metadata, is_train=True)
+    val_dataset = CMIDataset(val_data, val_ids, val_metadata, is_train=True)
 
     train_loader = DataLoader(
         train_dataset,
