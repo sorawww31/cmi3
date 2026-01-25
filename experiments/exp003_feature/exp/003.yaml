@@ -1,0 +1,8 @@
+# Full training experiment
+defaults:  
+  - default@_here_  # defaultの値を設定してから上書きする
+
+seed: 42
+folds: [0]
+epochs: 100
+rnn_hidden_size: 64
