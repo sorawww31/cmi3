@@ -8,7 +8,6 @@ Memory-optimized version:
 """
 
 from pathlib import Path
-from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -16,21 +15,6 @@ import torch
 from torch.utils.data import Dataset
 
 from src.preprocess import Preprocessor
-
-# センサーカラム定義（前処理後: オイラー角を使用）
-IMU_COLS = [
-    "acc_x",
-    "acc_y",
-    "acc_z",
-    "roll",
-    "pitch",
-    "yaw",
-]
-THM_COLS = [f"thm_{i}" for i in range(1, 6)]
-TOF_COLS = [f"tof_{i}_v{j}" for i in range(1, 6) for j in range(64)]
-
-ALL_SENSOR_COLS = IMU_COLS + THM_COLS + TOF_COLS
-
 
 # ジェスチャーラベル定義
 TARGET_GESTURES = [
@@ -200,7 +184,7 @@ def create_dataloaders(
     val_ids: list[int],
     batch_size: int = 32,
     max_length: int = 500,
-    sensor_cols: Optional[list[str]] = None,
+    sensor_cols: list[str] = [],
     num_workers: int = 4,
 ) -> tuple:
     """
@@ -214,8 +198,8 @@ def create_dataloaders(
     """
     from torch.utils.data import DataLoader
 
-    if sensor_cols is None:
-        sensor_cols = IMU_COLS
+    if not sensor_cols:
+        raise ValueError("sensor_cols must be provided")
 
     # 1. train/valデータを分離
     train_df = df[df["sequence_id"].isin(train_ids)]

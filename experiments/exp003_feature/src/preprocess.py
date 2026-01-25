@@ -17,11 +17,146 @@ from typing import Optional
 
 import numpy as np
 import pandas as pd
+from scipy.spatial.transform import Rotation as R
 
 # センサーカラムの定義
 IMU_COLS = ["acc_x", "acc_y", "acc_z", "rot_w", "rot_x", "rot_y", "rot_z"]
 THM_COLS = [f"thm_{i}" for i in range(1, 6)]
 TOF_COLS = [f"tof_{i}_v{j}" for i in range(1, 6) for j in range(64)]
+
+
+# ============================================================================
+# Accelerometer Feature Engineering Functions
+# ============================================================================
+
+
+def remove_gravity_from_acc(
+    acc_data: np.ndarray | pd.DataFrame,
+    rot_data: np.ndarray | pd.DataFrame,
+) -> np.ndarray:
+    """加速度データから重力成分を除去し、線形加速度を計算
+
+    Args:
+        acc_data: 加速度データ (N, 3) または DataFrame with acc_x, acc_y, acc_z
+        rot_data: クォータニオンデータ (N, 4) または DataFrame with rot_x, rot_y, rot_z, rot_w
+
+    Returns:
+        linear_accel: 重力除去後の線形加速度 (N, 3)
+    """
+    if isinstance(acc_data, pd.DataFrame):
+        acc_values = acc_data[["acc_x", "acc_y", "acc_z"]].values
+    else:
+        acc_values = acc_data
+
+    if isinstance(rot_data, pd.DataFrame):
+        quat_values = rot_data[["rot_x", "rot_y", "rot_z", "rot_w"]].values
+    else:
+        quat_values = rot_data
+
+    num_samples = acc_values.shape[0]
+    linear_accel = np.zeros_like(acc_values)
+    gravity_world = np.array([0, 0, 9.81])
+
+    for i in range(num_samples):
+        if np.all(np.isnan(quat_values[i])) or np.all(np.isclose(quat_values[i], 0)):
+            linear_accel[i, :] = acc_values[i, :]
+            continue
+        try:
+            rotation = R.from_quat(quat_values[i])
+            gravity_sensor_frame = rotation.apply(gravity_world, inverse=True)
+            linear_accel[i, :] = acc_values[i, :] - gravity_sensor_frame
+        except ValueError:
+            linear_accel[i, :] = acc_values[i, :]
+
+    return linear_accel
+
+
+def calculate_angular_velocity_from_quat(
+    rot_data: np.ndarray | pd.DataFrame,
+    time_delta: float = 1 / 200,  # 200Hz sampling rate
+) -> np.ndarray:
+    """クォータニオンから角速度を計算
+
+    Args:
+        rot_data: クォータニオンデータ (N, 4) または DataFrame
+        time_delta: サンプリング間隔（秒）
+
+    Returns:
+        angular_vel: 角速度 (N, 3) [rad/s]
+    """
+    if isinstance(rot_data, pd.DataFrame):
+        quat_values = rot_data[["rot_x", "rot_y", "rot_z", "rot_w"]].values
+    else:
+        quat_values = rot_data
+
+    num_samples = quat_values.shape[0]
+    angular_vel = np.zeros((num_samples, 3))
+
+    for i in range(num_samples - 1):
+        q_t = quat_values[i]
+        q_t_plus_dt = quat_values[i + 1]
+
+        if (
+            np.all(np.isnan(q_t))
+            or np.all(np.isclose(q_t, 0))
+            or np.all(np.isnan(q_t_plus_dt))
+            or np.all(np.isclose(q_t_plus_dt, 0))
+        ):
+            continue
+
+        try:
+            rot_t = R.from_quat(q_t)
+            rot_t_plus_dt = R.from_quat(q_t_plus_dt)
+            delta_rot = rot_t.inv() * rot_t_plus_dt
+            angular_vel[i, :] = delta_rot.as_rotvec() / time_delta
+        except ValueError:
+            pass
+
+    return angular_vel
+
+
+def calculate_angular_distance(
+    rot_data: np.ndarray | pd.DataFrame,
+) -> np.ndarray:
+    """連続するクォータニオン間の角距離を計算
+
+    Args:
+        rot_data: クォータニオンデータ (N, 4) または DataFrame
+
+    Returns:
+        angular_dist: 角距離 (N,) [rad]
+    """
+    if isinstance(rot_data, pd.DataFrame):
+        quat_values = rot_data[["rot_x", "rot_y", "rot_z", "rot_w"]].values
+    else:
+        quat_values = rot_data
+
+    num_samples = quat_values.shape[0]
+    angular_dist = np.zeros(num_samples)
+
+    for i in range(num_samples - 1):
+        q1 = quat_values[i]
+        q2 = quat_values[i + 1]
+
+        if (
+            np.all(np.isnan(q1))
+            or np.all(np.isclose(q1, 0))
+            or np.all(np.isnan(q2))
+            or np.all(np.isclose(q2, 0))
+        ):
+            angular_dist[i] = 0
+            continue
+
+        try:
+            r1 = R.from_quat(q1)
+            r2 = R.from_quat(q2)
+            relative_rotation = r1.inv() * r2
+            angle = np.linalg.norm(relative_rotation.as_rotvec())
+            angular_dist[i] = angle
+        except ValueError:
+            angular_dist[i] = 0
+
+    return angular_dist
 
 
 def fill_missing_values_inplace(df: pd.DataFrame) -> None:
@@ -47,67 +182,83 @@ def fill_missing_values_inplace(df: pd.DataFrame) -> None:
     tof_cols_exist = [col for col in TOF_COLS if col in df.columns]
     if tof_cols_exist:
         df[tof_cols_exist] = df[tof_cols_exist].fillna(0)
-        df[tof_cols_exist] = df[tof_cols_exist].replace(-1, 0)
+        df[tof_cols_exist] = df[tof_cols_exist].replace(-1, 255)
 
 
-def quaternion_to_euler(
-    w: np.ndarray, x: np.ndarray, y: np.ndarray, z: np.ndarray
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def quat_to_euler(df: pd.DataFrame) -> pd.DataFrame:
     """
-    クォータニオン (w, x, y, z) からオイラー角 (roll, pitch, yaw) に変換
-
-    Args:
-        w, x, y, z: クォータニオン成分の配列
-
-    Returns:
-        roll, pitch, yaw: オイラー角（ラジアン）
-    """
-    # Roll (x-axis rotation)
-    sinr_cosp = 2 * (w * x + y * z)
-    cosr_cosp = 1 - 2 * (x * x + y * y)
-    roll = np.arctan2(sinr_cosp, cosr_cosp)
-
-    # Pitch (y-axis rotation)
-    sinp = 2 * (w * y - z * x)
-    # ジンバルロック対策: sinpを[-1, 1]にクリップ
-    sinp = np.clip(sinp, -1.0, 1.0)
-    pitch = np.arcsin(sinp)
-
-    # Yaw (z-axis rotation)
-    siny_cosp = 2 * (w * z + x * y)
-    cosy_cosp = 1 - 2 * (y * y + z * z)
-    yaw = np.arctan2(siny_cosp, cosy_cosp)
-
-    return roll, pitch, yaw
-
-
-def add_euler_angles(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    rot_x, rot_y, rot_z, rot_wからオイラー角（roll, pitch, yaw）を計算して追加
-    元のrot_*列は削除
+    クォータニオン (rot_x, rot_y, rot_z, rot_w) からオイラー角 (roll, pitch, yaw) に変換
+    Scipyを使用 (degrees=True)
 
     Args:
         df: rot_x, rot_y, rot_z, rot_w列を含むDataFrame
 
     Returns:
-        オイラー角が追加されたDataFrame（デフラグメント済み）
+        roll, pitch, yaw を含むDataFrame
     """
-    roll, pitch, yaw = quaternion_to_euler(
-        df["rot_w"].values,
-        df["rot_x"].values,
-        df["rot_y"].values,
-        df["rot_z"].values,
+    # 1. 回転オブジェクトを作成
+    # Scipyのクオータニオン順序は (x, y, z, w)
+    quats = df[["rot_x", "rot_y", "rot_z", "rot_w"]].values
+
+    # ゼロノルムのクォータニオンをチェックして単位クォータニオン (0,0,0,1) に置換
+    norms = np.linalg.norm(quats, axis=1)
+    zero_norm_mask = norms < 1e-9
+
+    if zero_norm_mask.any():
+        # コピーを作成して書き換え
+        quats = quats.copy()
+        quats[zero_norm_mask] = [0, 0, 0, 1]
+
+    r = R.from_quat(quats)
+
+    # 2. オイラー角に変換 ('xyz'は回転の適用順序)
+    euler_angles = r.as_euler("xyz", degrees=True)
+
+    # 必要ならゼロノルムだった行のオイラー角を0にする（Identityなら自然に0になるが明示的にも可能）
+    # Identity (0,0,0,1) -> Euler (0,0,0) なのでそのままでOK
+
+    return pd.DataFrame(euler_angles, columns=["roll", "pitch", "yaw"], index=df.index)
+
+
+def euler_to_quat(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    オイラー角 (roll, pitch, yaw) からクォータニオン (rot_x, rot_y, rot_z, rot_w) に変換
+    Scipyを使用 (degrees=True)
+
+    Args:
+        df: roll, pitch, yaw列を含むDataFrame
+
+    Returns:
+        rot_x, rot_y, rot_z, rot_w を含むDataFrame
+    """
+    # 1. 回転オブジェクトを作成
+    r = R.from_euler("xyz", df[["roll", "pitch", "yaw"]].values, degrees=True)
+
+    # 2. クォータニオンに戻す
+    quats = r.as_quat()
+
+    return pd.DataFrame(
+        quats, columns=["rot_x", "rot_y", "rot_z", "rot_w"], index=df.index
     )
 
-    # クォータニオン列を除いたDataFrameを作成
-    cols_to_keep = [
-        c for c in df.columns if c not in ["rot_w", "rot_x", "rot_y", "rot_z"]
-    ]
 
-    # オイラー角のDataFrameを作成
-    euler_df = pd.DataFrame({"roll": roll, "pitch": pitch, "yaw": yaw}, index=df.index)
+def add_euler_angles(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    rot_x, rot_y, rot_z, rot_wからオイラー角を計算して追加
+    ※ rot_*列は保持する（後で補正後に更新するため）
 
-    # pd.concatで一括結合（断片化を回避）
+    Args:
+        df: rot_x, rot_y, rot_z, rot_w列を含むDataFrame
+
+    Returns:
+        オイラー角が追加されたDataFrame
+    """
+    euler_df = quat_to_euler(df)
+
+    # 既存のcolumnsと重複しないか確認しつつ結合
+    # もし既にroll/pitch/yawがある場合は上書きしたいが、pd.concatは重複名でエラーにならないため
+    # 明示的に除外してから結合するか、単にconcatする
+    cols_to_keep = [c for c in df.columns if c not in ["roll", "pitch", "yaw"]]
     return pd.concat([df[cols_to_keep], euler_df], axis=1)
 
 
@@ -172,8 +323,12 @@ class Preprocessor:
         apply_euler: bool = True,
         apply_handedness_correction: bool = True,
         apply_scaling: bool = True,
+        apply_linear_acc: bool = True,
+        apply_angular_vel: bool = True,
+        apply_angular_dist: bool = True,
         handness_col: str = "handness",
         feature_cols: Optional[list[str]] = None,
+        sampling_rate: float = 200.0,
     ):
         """
         Args:
@@ -181,15 +336,23 @@ class Preprocessor:
             apply_euler: クォータニオン→オイラー角変換を適用するか
             apply_handedness_correction: handness補正を適用するか
             apply_scaling: StandardScaler正規化を適用するか
+            apply_linear_acc: 重力除去後の線形加速度を計算するか
+            apply_angular_vel: 角速度を計算するか
+            apply_angular_dist: 角距離を計算するか
             handness_col: 利き手を示す列名
             feature_cols: 正規化対象のカラムリスト（Noneの場合は自動検出）
+            sampling_rate: サンプリングレート (Hz)
         """
         self.apply_fill_missing = apply_fill_missing
         self.apply_euler = apply_euler
         self.apply_handedness_correction = apply_handedness_correction
         self.apply_scaling = apply_scaling
+        self.apply_linear_acc = apply_linear_acc
+        self.apply_angular_vel = apply_angular_vel
+        self.apply_angular_dist = apply_angular_dist
         self.handness_col = handness_col
         self.feature_cols = feature_cols
+        self.sampling_rate = sampling_rate
 
         # StandardScalerのパラメータ
         self.mean_: Optional[pd.Series] = None
@@ -214,22 +377,60 @@ class Preprocessor:
         return [col for col in numeric_cols if col not in exclude_cols]
 
     def _apply_preprocessing(self, df: pd.DataFrame) -> pd.DataFrame:
-        """欠損値補完、オイラー角変換、handness補正を適用"""
+        """欠損値補完、オイラー角変換、handness補正、特徴量生成を適用"""
 
         # 1. 欠損値補完
         if self.apply_fill_missing:
             fill_missing_values_inplace(df)
 
-        # 2. クォータニオン → オイラー角変換
-        if self.apply_euler:
-            required_cols = ["rot_w", "rot_x", "rot_y", "rot_z"]
-            if all(col in df.columns for col in required_cols):
-                df = add_euler_angles(df)
+        # 2. クォータニオン → オイラー角変換 (Roll/Pitch/Yaw 生成)
+        required_quat_cols = ["rot_w", "rot_x", "rot_y", "rot_z"]
+        has_quat = all(col in df.columns for col in required_quat_cols)
 
-        # 3. Handedness補正
+        if self.apply_euler and has_quat:
+            df = add_euler_angles(df)
+
+        # 3. Handedness補正 (Acc & Euler Inversion, Sensor Swap)
         if self.apply_handedness_correction:
             if self.handness_col in df.columns:
                 correct_handedness_inplace(df, self.handness_col)
+
+        # 4. オイラー角 → クォータニオン (補正されたオイラー角から再生成)
+        # Euler変換とHandedness補正の両方が適用された場合のみ再生成
+        if self.apply_euler and has_quat and self.apply_handedness_correction:
+            if all(c in df.columns for c in ["roll", "pitch", "yaw"]):
+                new_quats = euler_to_quat(df)
+                # rotカラムを更新
+                df[required_quat_cols] = new_quats[required_quat_cols]
+
+        # 5. 特徴量生成 (線形加速度、角速度など)
+        # ※ 補正後の acc, rot を使用して計算する
+        has_acc = all(col in df.columns for col in ["acc_x", "acc_y", "acc_z"])
+        new_features = {}
+
+        if has_quat and has_acc and self.apply_linear_acc:
+            # 重力除去後の線形加速度を計算
+            linear_acc = remove_gravity_from_acc(df, df)
+            new_features["linear_acc_x"] = linear_acc[:, 0]
+            new_features["linear_acc_y"] = linear_acc[:, 1]
+            new_features["linear_acc_z"] = linear_acc[:, 2]
+
+        if has_quat and self.apply_angular_vel:
+            # 角速度を計算
+            time_delta = 1.0 / self.sampling_rate
+            angular_vel = calculate_angular_velocity_from_quat(df, time_delta)
+            new_features["angular_vel_x"] = angular_vel[:, 0]
+            new_features["angular_vel_y"] = angular_vel[:, 1]
+            new_features["angular_vel_z"] = angular_vel[:, 2]
+
+        if has_quat and self.apply_angular_dist:
+            # 角距離を計算
+            angular_dist = calculate_angular_distance(df)
+            new_features["angular_dist"] = angular_dist
+
+        if new_features:
+            new_features_df = pd.DataFrame(new_features, index=df.index)
+            df = pd.concat([df, new_features_df], axis=1)
 
         return df
 

@@ -8,6 +8,7 @@ from typing import Literal
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 
 @dataclass
@@ -16,19 +17,49 @@ class BranchConfig:
 
     Attributes:
         name: Unique identifier for the branch
-        input_channels: Number of input channels (features in this group)
-        channel_indices: Tuple of (start, end) indices to slice input features
+        columns: List of column names for this branch (e.g., ['acc_x', 'acc_y', 'acc_z'])
         hidden_channels: List of hidden channel sizes for each Conv1D layer
         kernel_size: Kernel size for Conv1D layers
         pool_size: Pooling size for AvgPool1d layers between Conv blocks
+        channel_indices: Tuple of (start, end) indices (auto-computed from columns)
     """
 
     name: str
-    input_channels: int
-    channel_indices: tuple[int, int]  # (start_idx, end_idx) for slicing
+    columns: list[str]  # Column names for this branch
     hidden_channels: list[int] = field(default_factory=lambda: [16, 32, 64])
     kernel_size: int = 3
     pool_size: int = 2
+    channel_indices: tuple[int, int] | None = None  # Set by resolve_branch_indices()
+
+    @property
+    def input_channels(self) -> int:
+        """Returns the number of input channels (derived from columns)."""
+        return len(self.columns)
+
+
+class AttentionPooling(nn.Module):
+    def __init__(self, input_dim):
+        super().__init__()
+        # 各時刻の特徴量から「重要度スコア」を出す層
+        self.attention_weights = nn.Linear(input_dim, 1)
+
+    def forward(self, x):
+        # x shape: (Batch, Time_Steps, Features)
+
+        # 1. 重要度スコアを計算
+        # (Batch, Time, Features) -> (Batch, Time, 1)
+        scores = self.attention_weights(x)
+
+        # 2. Softmaxで確率（重み）に変換
+        # dim=1 (時間方向) で合計1になるようにする
+        weights = F.softmax(scores, dim=1)
+
+        # 3. 加重和 (Weighted Sum)
+        # 特徴量(x) に 重み(weights) を掛けて足し合わせる
+        # (Batch, Time, Features) * (Batch, Time, 1) -> sum -> (Batch, Features)
+        output = torch.sum(x * weights, dim=1)
+
+        return output
 
 
 class Conv1DBlock(nn.Module):
@@ -55,6 +86,61 @@ class Conv1DBlock(nn.Module):
         return x
 
 
+class AttentionPooling1d(nn.Module):
+    def __init__(self, input_dim, kernel_size):
+        super().__init__()
+        # 重要度を計算するための層
+        self.attn_layer = nn.Linear(input_dim, 1)
+        self.kernel_size = kernel_size
+
+    def forward(self, x):
+        """
+        x: (Batch, Features, Time)
+        """
+        batch_size, features, time_steps = x.size()
+
+        # パディングが必要か確認
+        pad_size = 0
+        if time_steps % self.kernel_size != 0:
+            pad_size = self.kernel_size - (time_steps % self.kernel_size)
+            # F.padは (last_dim_left, last_dim_right, 2nd_last_left, 2nd_last_right, ...)
+            # Time次元（最後）の右側にpaddingを追加
+            x = F.pad(x, (0, pad_size))
+            time_steps += pad_size
+
+        # 1. 時間軸を分割するためにReshape
+        # (B, F, T) -> (B, F, T_new, K)
+        # ※ Tは最後の次元なので、そのまま分割可能です
+        x_reshaped = x.view(
+            batch_size, features, time_steps // self.kernel_size, self.kernel_size
+        )
+
+        # 2. 次元入れ替え (Permute)
+        # nn.Linearは「最後の次元」に対して作用するため、Features(F)を最後に持ってくる必要があります
+        # (B, F, T_new, K) -> (B, T_new, K, F)
+        x_permuted = x_reshaped.permute(0, 2, 3, 1)
+
+        # 3. スコア計算
+        # (B, T_new, K, F) -> (B, T_new, K, 1)
+        scores = self.attn_layer(x_permuted)
+
+        # 4. Kernel内(dim=2)でSoftmaxをとる -> 重み
+        # これで「K個の近傍点の中で、どれを重視するか」が決まります
+        weights = F.softmax(scores, dim=2)
+
+        # 5. 加重和 (Weighted Sum)
+        # Data:    (B, T_new, K, F)
+        # Weights: (B, T_new, K, 1)
+        # 掛け合わせて dim=2 (K) で合計 -> (B, T_new, F)
+        weighted_sum = torch.sum(x_permuted * weights, dim=2)
+
+        # 6. 元の形式 (B, F, T) に戻す
+        # (B, T_new, F) -> (B, F, T_new)
+        output = weighted_sum.permute(0, 2, 1)
+
+        return output
+
+
 class FeatureBranch(nn.Module):
     """Dynamic feature branch encoder using Conv1D blocks.
 
@@ -73,6 +159,7 @@ class FeatureBranch(nn.Module):
             # Add pooling after each layer except the last
             if i < len(config.hidden_channels) - 1:
                 layers.append(nn.AvgPool1d(config.pool_size))
+                # layers.append(AttentionPooling1d(out_ch, config.kernel_size))
             in_ch = out_ch
 
         self.encoder = nn.Sequential(*layers)
@@ -190,6 +277,8 @@ class CMIModel(nn.Module):
         if mlp_hidden_channels is None:
             mlp_hidden_channels = [rnn_output_size // 2]
 
+        self.global_pool = AttentionPooling(rnn_output_size)
+
         self.head = MLPHead(
             in_channel=rnn_output_size,
             hidden_channels=mlp_hidden_channels,
@@ -211,6 +300,11 @@ class CMIModel(nn.Module):
         encoded_features = []
         for cfg in self.branch_configs:
             branch = self.branches[cfg.name]
+            if cfg.channel_indices is None:
+                raise RuntimeError(
+                    f"channel_indices not set for branch '{cfg.name}'. "
+                    "Call resolve_branch_indices() before creating the model."
+                )
             start, end = cfg.channel_indices
             branch_input = x[:, start:end, :]  # (Batch, branch_channels, Time)
             encoded = branch(branch_input)  # (Batch, output_channels, Time')
@@ -227,7 +321,7 @@ class CMIModel(nn.Module):
 
         # --- 3. Global Average Pooling ---
         # Average over time dimension
-        feature = output.mean(dim=1)  # (Batch, hidden*directions)
+        feature = self.global_pool(output)  # (Batch, hidden*directions)
 
         # --- 4. Classification ---
         logits = self.head(feature)
@@ -235,27 +329,62 @@ class CMIModel(nn.Module):
 
 
 # ============================================================================
-# Default branch configurations
+# Default branch configurations (column-name based)
 # ============================================================================
 
 DEFAULT_BRANCH_CONFIGS = [
     BranchConfig(
         name="imu",
-        input_channels=3,
-        channel_indices=(0, 3),
+        columns=["acc_x", "acc_y", "acc_z"],
         hidden_channels=[8, 16, 32],
-        kernel_size=3,
-        pool_size=2,
     ),
     BranchConfig(
         name="euler",
-        input_channels=3,
-        channel_indices=(3, 6),
+        columns=["roll", "pitch", "yaw"],
         hidden_channels=[8, 16, 32],
-        kernel_size=3,
-        pool_size=2,
     ),
 ]
+
+
+def resolve_branch_indices(
+    branch_configs: list[BranchConfig],
+    sensor_cols: list[str],
+) -> list[BranchConfig]:
+    """Resolve channel_indices for each BranchConfig based on sensor column order.
+
+    Args:
+        branch_configs: List of BranchConfig with column names defined
+        sensor_cols: Ordered list of all sensor columns used in the dataset
+
+    Returns:
+        Updated list of BranchConfig with channel_indices set
+
+    Raises:
+        ValueError: If a column in branch_configs is not found in sensor_cols
+    """
+    col_to_idx = {col: idx for idx, col in enumerate(sensor_cols)}
+
+    for cfg in branch_configs:
+        # Find start and end indices for this branch's columns
+        indices = []
+        for col in cfg.columns:
+            if col not in col_to_idx:
+                raise ValueError(
+                    f"Column '{col}' in branch '{cfg.name}' not found in sensor_cols. "
+                    f"Available: {sensor_cols}"
+                )
+            indices.append(col_to_idx[col])
+
+        # Verify columns are contiguous
+        if indices != list(range(min(indices), max(indices) + 1)):
+            raise ValueError(
+                f"Columns in branch '{cfg.name}' must be contiguous in sensor_cols. "
+                f"Got indices: {indices}"
+            )
+
+        cfg.channel_indices = (min(indices), max(indices) + 1)
+
+    return branch_configs
 
 
 def get_model(

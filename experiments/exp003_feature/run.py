@@ -33,15 +33,14 @@ from utils.timing import trace  # noqa: E402
 
 # ローカルモジュール（相対インポートでなく直接追加）
 sys.path.insert(0, current_dir)
+from src.columns import build_branch_configs, get_sensor_cols  # noqa: E402
 from src.config import Config, ExpConfig  # noqa: E402
 from src.dataset import (  # noqa: E402
-    ALL_SENSOR_COLS,
     GESTURE_TO_IDX,
-    IMU_COLS,
     create_dataloaders,
     load_train_data,
 )
-from src.models import get_model  # noqa: E402
+from src.models import get_model, resolve_branch_indices  # noqa: E402
 from src.train import train_fold  # noqa: E402
 from src.utils import count_parameters, get_device, set_seed  # noqa: E402
 
@@ -88,12 +87,12 @@ def save_config(cfg: Config, logger) -> None:
     logger.info(f"Config saved to: {config_path}")
 
 
-def get_sensor_cols(sensor_type: str) -> list[str]:
-    """センサータイプに応じたカラムを取得"""
+def get_sensor_groups(sensor_type: str) -> list[str]:
+    """センサータイプに応じたグループ名リストを取得"""
     if sensor_type == "imu":
-        return IMU_COLS
+        return ["imu", "euler"]
     elif sensor_type == "all":
-        return ALL_SENSOR_COLS
+        return ["imu", "euler", "thm", "tof"]
     else:
         raise ValueError(f"Unknown sensor_type: {sensor_type}")
 
@@ -128,9 +127,7 @@ def main(cfg: Config) -> None:
     LOGGER.info("output_dir: %s", output_dir)
     LOGGER.info("Start CMI Behavior Detection Training")
 
-    exp_name = (
-        f"{Path(sys.argv[0]).parent.name}/{HydraConfig.get().runtime.choices['exp']}"
-    )
+    exp_name = f"{Path(sys.argv[0]).parent.name}/{HydraConfig.get().runtime.choices['exp']}_{cfg.exp.name}"
 
     log_config(cfg, LOGGER)
     save_config(cfg, LOGGER)
@@ -179,10 +176,17 @@ def main(cfg: Config) -> None:
     LOGGER.info("Preparing fold splits...")
     splits = prepare_fold_splits(train_df, cfg.exp.n_folds)
 
-    # Get sensor columns
-    sensor_cols = get_sensor_cols(cfg.exp.sensor_type)
+    # Get sensor columns from group definitions
+    if cfg.exp.features is not None:
+        group_names = list(cfg.exp.features)
+    else:
+        # Fallback to sensor_type for backward compatibility
+        group_names = get_sensor_groups(cfg.exp.sensor_type)
+
+    sensor_cols = get_sensor_cols(group_names)
     input_size = len(sensor_cols)
     num_classes = len(GESTURE_TO_IDX)
+    LOGGER.info(f"Using feature groups: {group_names}")
     LOGGER.info(f"Input size: {input_size}, Num classes: {num_classes}")
 
     # Training loop
@@ -212,66 +216,16 @@ def main(cfg: Config) -> None:
         # Create model
         LOGGER.info("Creation CMIModel")
 
-        # Build branch configs based on sensor columns
-        from src.models import BranchConfig
-
-        branch_configs = []
+        # Build branch configs using centralized column definitions
         mult = cfg.exp.branch_hidden_multiplier
+        # group_names is already defined above
 
-        if cfg.exp.sensor_type == "imu":
-            # IMU: acc (3ch) + euler (3ch)
-            imu_ch = 3
-            euler_ch = 3
-            branch_configs = [
-                BranchConfig(
-                    name="imu",
-                    input_channels=imu_ch,
-                    channel_indices=(0, imu_ch),
-                    hidden_channels=[
-                        imu_ch * mult,
-                        imu_ch * mult * 2,
-                        imu_ch * mult * 4,
-                    ],
-                ),
-                BranchConfig(
-                    name="euler",
-                    input_channels=euler_ch,
-                    channel_indices=(imu_ch, imu_ch + euler_ch),
-                    hidden_channels=[
-                        euler_ch * mult,
-                        euler_ch * mult * 2,
-                        euler_ch * mult * 4,
-                    ],
-                ),
-            ]
-        elif cfg.exp.sensor_type == "all":
-            # All sensors: acc (3ch) + euler (3ch) + thm (5ch) + tof (5ch)
-            branch_configs = [
-                BranchConfig(
-                    name="imu",
-                    input_channels=3,
-                    channel_indices=(0, 3),
-                    hidden_channels=[3 * mult, 3 * mult * 2, 3 * mult * 4],
-                ),
-                BranchConfig(
-                    name="euler",
-                    input_channels=3,
-                    channel_indices=(3, 6),
-                    hidden_channels=[3 * mult, 3 * mult * 2, 3 * mult * 4],
-                ),
-                BranchConfig(
-                    name="thm",
-                    input_channels=5,
-                    channel_indices=(6, 11),
-                    hidden_channels=[5 * mult, 5 * mult * 2, 5 * mult * 4],
-                ),
-                BranchConfig(
-                    name="tof",
-                    input_channels=5,
-                    channel_indices=(11, 16),
-                    hidden_channels=[5 * mult, 5 * mult * 2, 5 * mult * 4],
-                ),
-            ]
+        # Generate configs from centralized definitions
+        branch_configs = build_branch_configs(group_names, hidden_multiplier=mult)
+
+        # Resolve channel indices based on actual sensor_cols order
+        branch_configs = resolve_branch_indices(branch_configs, sensor_cols)
+        LOGGER.info(f"Branch configs resolved for {len(branch_configs)} branches")
 
         model = get_model(
             model_name=cfg.exp.model_name,

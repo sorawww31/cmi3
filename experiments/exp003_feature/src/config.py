@@ -14,12 +14,15 @@ class ExpConfig:
 
     # Wandb
     wandb_project_name: Optional[str] = os.getenv("COMPETITION", "cmi3")
-
+    name: str = ""
     # Data
     max_length: int = 120
     batch_size: int = 64
     num_workers: int = 4
     sensor_type: str = "imu"  # imu, all
+    # List of feature groups to use. If None, inferred from sensor_type.
+    # Available: imu, euler, linear_acc, angular_vel, angular_dist, thm, tof
+    features: list[str] = field(default_factory=lambda: ["imu", "rot"])
 
     # Model Architecture
     model_name: str = "cmi"
