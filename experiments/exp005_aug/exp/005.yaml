@@ -3,11 +3,10 @@ defaults:
   - default@_here_  # defaultの値を設定してから上書きする
 
 seed: 42
-# folds: [0]
+folds: [0]
 epochs: 100
 learning_rate: 3e-4
 weight_decay: 3e-4
 batch_size: 64
-rnn_type: "transformer"
-features: ["imu","rot", "angular_vel", "jerk", "acc2", "euler"]
-patience: 20
+
+features: ["imu","rot"]
