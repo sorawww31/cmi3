@@ -222,6 +222,7 @@ class CMIModel(nn.Module):
         # --- 2. RNN Layer ---
         # RNN expects (Batch, Time, Features)
         x = x.transpose(1, 2)  # (Batch, Time', total_channels)
+        self.rnn.flatten_parameters()  # Suppress contiguous memory warning
         output, _ = self.rnn(x)  # (Batch, Time', hidden*directions)
 
         # --- 3. Global Average Pooling ---
@@ -261,7 +262,7 @@ def get_model(
     model_name: str = "cmi",
     num_classes: int = 18,
     branch_configs: list[BranchConfig] | None = None,
-    rnn_type: Literal["gru", "lstm"] = "gru",
+    rnn_type: str = "gru",
     rnn_hidden_size: int = 96,
     rnn_num_layers: int = 2,
     rnn_dropout: float = 0.2,

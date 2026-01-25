@@ -211,13 +211,79 @@ def main(cfg: Config) -> None:
 
         # Create model
         LOGGER.info("Creation CMIModel")
+
+        # Build branch configs based on sensor columns
+        from src.models import BranchConfig
+
+        branch_configs = []
+        mult = cfg.exp.branch_hidden_multiplier
+
+        if cfg.exp.sensor_type == "imu":
+            # IMU: acc (3ch) + euler (3ch)
+            imu_ch = 3
+            euler_ch = 3
+            branch_configs = [
+                BranchConfig(
+                    name="imu",
+                    input_channels=imu_ch,
+                    channel_indices=(0, imu_ch),
+                    hidden_channels=[
+                        imu_ch * mult,
+                        imu_ch * mult * 2,
+                        imu_ch * mult * 4,
+                    ],
+                ),
+                BranchConfig(
+                    name="euler",
+                    input_channels=euler_ch,
+                    channel_indices=(imu_ch, imu_ch + euler_ch),
+                    hidden_channels=[
+                        euler_ch * mult,
+                        euler_ch * mult * 2,
+                        euler_ch * mult * 4,
+                    ],
+                ),
+            ]
+        elif cfg.exp.sensor_type == "all":
+            # All sensors: acc (3ch) + euler (3ch) + thm (5ch) + tof (5ch)
+            branch_configs = [
+                BranchConfig(
+                    name="imu",
+                    input_channels=3,
+                    channel_indices=(0, 3),
+                    hidden_channels=[3 * mult, 3 * mult * 2, 3 * mult * 4],
+                ),
+                BranchConfig(
+                    name="euler",
+                    input_channels=3,
+                    channel_indices=(3, 6),
+                    hidden_channels=[3 * mult, 3 * mult * 2, 3 * mult * 4],
+                ),
+                BranchConfig(
+                    name="thm",
+                    input_channels=5,
+                    channel_indices=(6, 11),
+                    hidden_channels=[5 * mult, 5 * mult * 2, 5 * mult * 4],
+                ),
+                BranchConfig(
+                    name="tof",
+                    input_channels=5,
+                    channel_indices=(11, 16),
+                    hidden_channels=[5 * mult, 5 * mult * 2, 5 * mult * 4],
+                ),
+            ]
+
         model = get_model(
-            cfg.exp.model_name,
-            input_size=input_size,
+            model_name=cfg.exp.model_name,
             num_classes=num_classes,
-            hidden_size=cfg.exp.hidden_size,
-            num_layers=cfg.exp.num_layers,
-            dropout=cfg.exp.dropout,
+            branch_configs=branch_configs,
+            rnn_type=cfg.exp.rnn_type,
+            rnn_hidden_size=cfg.exp.rnn_hidden_size,
+            rnn_num_layers=cfg.exp.rnn_num_layers,
+            rnn_dropout=cfg.exp.rnn_dropout,
+            rnn_bidirectional=cfg.exp.rnn_bidirectional,
+            mlp_hidden_channels=list(cfg.exp.mlp_hidden_channels),
+            mlp_dropout=cfg.exp.mlp_dropout,
         )
         model = model.to(device)
         LOGGER.info(

@@ -16,16 +16,27 @@ class ExpConfig:
     wandb_project_name: Optional[str] = os.getenv("COMPETITION", "cmi3")
 
     # Data
-    max_length: int = 144
-    batch_size: int = 32
+    max_length: int = 120
+    batch_size: int = 64
     num_workers: int = 4
     sensor_type: str = "imu"  # imu, all
 
-    # Model
-    model_name: str = "lstm"  # lstm, cnn1d, transformer
-    hidden_size: int = 128
-    num_layers: int = 2
-    dropout: float = 0.3
+    # Model Architecture
+    model_name: str = "cmi"
+
+    # RNN settings
+    rnn_type: str = "gru"  # gru, lstm
+    rnn_hidden_size: int = 96
+    rnn_num_layers: int = 2
+    rnn_dropout: float = 0.2
+    rnn_bidirectional: bool = True
+
+    # MLP Head settings
+    mlp_hidden_channels: list[int] = field(default_factory=lambda: [96])
+    mlp_dropout: float = 0.3
+
+    # Branch encoder settings (channel multiplier for Conv1D layers)
+    branch_hidden_multiplier: int = 2  # hidden_channels = [in*2, in*4, in*8]
 
     # Training
     epochs: int = 100
