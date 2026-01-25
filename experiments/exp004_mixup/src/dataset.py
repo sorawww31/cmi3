@@ -138,6 +138,7 @@ class CMIDataset(Dataset):
         sequence_ids: list[int],
         metadata: dict[int, dict],
         is_train: bool = True,
+        alpha: float = 0.3,
     ):
         """
         Args:
@@ -145,35 +146,93 @@ class CMIDataset(Dataset):
             sequence_ids: 使用するシーケンスIDのリスト
             metadata: シーケンスIDをキーとするメタデータ辞書
             is_train: 訓練モードかどうか
+            alpha: Mixup parameter for Beta distribution
         """
         self.data_array = data_array
         self.sequence_ids = sequence_ids
         self.metadata = metadata
         self.is_train = is_train
+        self.alpha = alpha
+        self.num_classes = len(TARGET_GESTURES) + len(NON_TARGET_GESTURES)
 
     def __len__(self) -> int:
         return len(self.sequence_ids)
 
-    def __getitem__(self, idx: int) -> dict:
+    def _get_data(self, idx: int):
         seq_id = self.sequence_ids[idx]
         seq_idx = self.metadata[seq_id]["idx"]
-
-        # NumPy配列から直接取得（O(1)アクセス）
         data = self.data_array[seq_idx]
 
-        result = {
-            "sequence_id": seq_id,
-            "data": torch.from_numpy(data),  # (max_length, n_features)
-        }
-
+        label_idx = None
         if self.is_train:
             gesture = self.metadata[seq_id]["gesture"]
-            label = GESTURE_TO_IDX[gesture]
-            result["label"] = torch.tensor(label, dtype=torch.long)
+            label_idx = GESTURE_TO_IDX[gesture]
 
-            # Binary label (target vs non-target)
-            is_target = gesture in TARGET_GESTURES
+        return data, label_idx, seq_id
+
+    def __getitem__(self, idx: int) -> dict:
+        # Default behavior (no mixup or val)
+        X, y_idx, seq_id = self._get_data(idx)
+
+        # Determine if we should apply mixup
+        # ユーザー参照コード: p <= 0.0 -> Original, Else -> Mixup
+        # np.random.rand() returns [0, 1), so p <= 0.0 only if p=0. basically always Mixup.
+        # We will follow this logic for 'train' mode.
+
+        do_mixup = False
+        if self.is_train and self.alpha > 0:
+            p = np.random.rand()
+            if (
+                p > 0.0
+            ):  # Reference logic inverted: if p <= 0.0 -> straight. Else -> mix.
+                do_mixup = True
+
+        if do_mixup:
+            # Mixup
+            lam = np.random.beta(self.alpha, self.alpha)
+            j = np.random.randint(0, len(self.sequence_ids))
+
+            X2, y2_idx, _ = self._get_data(j)
+
+            # Mix Data
+            # X, X2 are pre-padded numpy arrays of same shape (max_len, features)
+            X_mixed = lam * X + (1 - lam) * X2
+
+            # Mix Labels (One-hot)
+            y_onehot = np.zeros(self.num_classes, dtype=np.float32)
+            y_onehot[y_idx] = 1.0
+
+            y2_onehot = np.zeros(self.num_classes, dtype=np.float32)
+            y2_onehot[y2_idx] = 1.0
+
+            y_mixed = lam * y_onehot + (1 - lam) * y2_onehot
+
+            result = {
+                "sequence_id": seq_id,
+                "data": torch.from_numpy(X_mixed.astype(np.float32)),
+                "label": torch.from_numpy(y_mixed.astype(np.float32)),  # Soft label
+                "label_origin": torch.tensor(
+                    y_idx, dtype=torch.long
+                ),  # Hard label for metrics
+            }
+
+            # is_target (Optional: can mix or just take original? usually just keep original for tracking)
+            is_target = IDX_TO_GESTURE[y_idx] in TARGET_GESTURES
             result["is_target"] = torch.tensor(is_target, dtype=torch.float32)
+
+        else:
+            # Standard return
+            result = {
+                "sequence_id": seq_id,
+                "data": torch.from_numpy(X),
+            }
+
+            if self.is_train:
+                result["label"] = torch.tensor(y_idx, dtype=torch.long)
+                result["label_origin"] = torch.tensor(y_idx, dtype=torch.long)
+
+                is_target = IDX_TO_GESTURE[y_idx] in TARGET_GESTURES
+                result["is_target"] = torch.tensor(is_target, dtype=torch.float32)
 
         return result
 
@@ -222,8 +281,10 @@ def create_dataloaders(
     del train_df, val_df, train_df_processed, val_df_processed
 
     # 5. Dataset作成
-    train_dataset = CMIDataset(train_data, train_ids, train_metadata, is_train=True)
-    val_dataset = CMIDataset(val_data, val_ids, val_metadata, is_train=True)
+    train_dataset = CMIDataset(
+        train_data, train_ids, train_metadata, is_train=True, alpha=0.4
+    )
+    val_dataset = CMIDataset(val_data, val_ids, val_metadata, is_train=True, alpha=0.0)
 
     train_loader = DataLoader(
         train_dataset,

@@ -1,8 +1,4 @@
-"""
-Model architectures for CMI Behavior Detection competition.
-Scalable multi-branch architecture with configurable feature encoders.
-"""
-
+import math
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -210,12 +206,47 @@ class MLPHead(nn.Module):
         return self.mlp(x)
 
 
+# ============================================================================
+# NEW: Positional Encoding for Transformer
+# ============================================================================
+class PositionalEncoding(nn.Module):
+    """Inject some information about the relative or absolute position of the tokens
+    in the sequence. The positional encodings have the same dimension as
+    the embeddings, so that the two can be summed.
+    """
+
+    def __init__(self, d_model: int, dropout: float = 0.1, max_len: int = 5000):
+        super().__init__()
+        self.dropout = nn.Dropout(p=dropout)
+
+        position = torch.arange(max_len).unsqueeze(1)
+        div_term = torch.exp(
+            torch.arange(0, d_model, 2) * (-math.log(10000.0) / d_model)
+        )
+        pe = torch.zeros(max_len, 1, d_model)
+        pe[:, 0, 0::2] = torch.sin(position * div_term)
+        pe[:, 0, 1::2] = torch.cos(position * div_term)
+
+        # Batch first用に transpose: (Time, 1, D) -> (1, Time, D)
+        self.register_buffer("pe", pe.transpose(0, 1))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x: Tensor, shape [batch_size, seq_len, embedding_dim]
+        """
+        # xの長さに合わせてスライスして加算
+        x = x + self.pe[:, : x.size(1), :]
+        return self.dropout(x)
+
+
 class CMIModel(nn.Module):
     """Scalable Multi-Branch Model for CMI competition.
+    Supports GRU, LSTM, and Transformer.
 
     Architecture:
         1. Feature branches: Separate Conv1D encoders for each feature group
-        2. RNN layer: GRU/LSTM/Transformer for temporal modeling
+        2. Sequence Modeling layer: GRU/LSTM/Transformer
         3. Global Average Pooling: Aggregate temporal features
         4. MLP Head: Classification head
 
@@ -223,10 +254,12 @@ class CMIModel(nn.Module):
         branch_configs: List of BranchConfig for each feature group
         num_classes: Number of output classes
         rnn_type: Type of RNN layer ("gru", "lstm", "transformer")
-        rnn_hidden_size: Hidden size for RNN layer
+        rnn_hidden_size: Hidden size for RNN layer (d_model for Transformer)
         rnn_num_layers: Number of RNN layers
         rnn_dropout: Dropout for RNN layer
-        rnn_bidirectional: Whether to use bidirectional RNN
+        rnn_bidirectional: Whether to use bidirectional RNN (Ignored for Transformer)
+        nhead: Number of heads for Transformer
+        dim_feedforward: Feedforward dimension for Transformer
         mlp_hidden_channels: Hidden channel sizes for MLP head
         mlp_dropout: Dropout for MLP head
     """
@@ -235,17 +268,21 @@ class CMIModel(nn.Module):
         self,
         branch_configs: list[BranchConfig],
         num_classes: int = 18,
-        rnn_type: Literal["gru", "lstm"] = "gru",
-        rnn_hidden_size: int = 96,
+        rnn_type: Literal["gru", "lstm", "transformer"] = "transformer",
+        rnn_hidden_size: int = 128,  # d_model for Transformer
         rnn_num_layers: int = 2,
         rnn_dropout: float = 0.2,
         rnn_bidirectional: bool = True,
+        # Transformer specific
+        nhead: int = 4,
+        dim_feedforward: int = 512,
         mlp_hidden_channels: list[int] | None = None,
         mlp_dropout: float = 0.3,
     ):
         super().__init__()
 
         self.branch_configs = branch_configs
+        self.rnn_type = rnn_type.lower()
         self.rnn_bidirectional = rnn_bidirectional
 
         # --- 1. Feature Branch Encoders ---
@@ -253,27 +290,43 @@ class CMIModel(nn.Module):
             {cfg.name: FeatureBranch(cfg) for cfg in branch_configs}
         )
 
-        # Calculate total output channels from all branches
         total_encoder_channels = sum(
             branch.output_channels for branch in self.branches.values()
         )
 
-        # --- 2. RNN Layer ---
-        rnn_cls = nn.GRU if rnn_type == "gru" else nn.LSTM
-        self.rnn = rnn_cls(
-            input_size=total_encoder_channels,
-            hidden_size=rnn_hidden_size,
-            batch_first=True,
-            bidirectional=rnn_bidirectional,
-            num_layers=rnn_num_layers,
-            dropout=rnn_dropout if rnn_num_layers > 1 else 0.0,
-        )
+        # --- 2. Sequence Modeling Layer (RNN or Transformer) ---
+        if self.rnn_type == "transformer":
+            # Transformerには固定のd_modelが必要なので、ブランチ出力を射影する層を追加
+            self.input_proj = nn.Linear(total_encoder_channels, rnn_hidden_size)
+            self.pos_encoder = PositionalEncoding(rnn_hidden_size, dropout=rnn_dropout)
 
-        # --- 3. Global Average Pooling (applied in forward) ---
+            encoder_layer = nn.TransformerEncoderLayer(
+                d_model=rnn_hidden_size,
+                nhead=nhead,
+                dim_feedforward=dim_feedforward,
+                dropout=rnn_dropout,
+                batch_first=True,  # Batch First!
+                activation="gelu",
+            )
+            self.sequence_model = nn.TransformerEncoder(
+                encoder_layer, num_layers=rnn_num_layers
+            )
+            rnn_output_size = rnn_hidden_size  # Transformer output size is d_model
 
-        # --- 4. MLP Head ---
-        # RNN output size: hidden_size * 2 if bidirectional
-        rnn_output_size = rnn_hidden_size * (2 if rnn_bidirectional else 1)
+        else:
+            # GRU / LSTM
+            rnn_cls = nn.GRU if self.rnn_type == "gru" else nn.LSTM
+            self.sequence_model = rnn_cls(
+                input_size=total_encoder_channels,
+                hidden_size=rnn_hidden_size,
+                batch_first=True,
+                bidirectional=rnn_bidirectional,
+                num_layers=rnn_num_layers,
+                dropout=rnn_dropout if rnn_num_layers > 1 else 0.0,
+            )
+            rnn_output_size = rnn_hidden_size * (2 if rnn_bidirectional else 1)
+
+        # --- 3. Global Pooling & MLP Head ---
         if mlp_hidden_channels is None:
             mlp_hidden_channels = [rnn_output_size // 2]
 
@@ -313,15 +366,22 @@ class CMIModel(nn.Module):
         # Concatenate all branch outputs along channel dimension
         x = torch.cat(encoded_features, dim=1)  # (Batch, total_channels, Time')
 
-        # --- 2. RNN Layer ---
-        # RNN expects (Batch, Time, Features)
-        x = x.transpose(1, 2)  # (Batch, Time', total_channels)
-        self.rnn.flatten_parameters()  # Suppress contiguous memory warning
-        output, _ = self.rnn(x)  # (Batch, Time', hidden*directions)
+        # --- 2. Sequence Modeling ---
+        # (Batch, total_channels, Time') -> (Batch, Time', total_channels)
+        x = x.transpose(1, 2)
 
-        # --- 3. Global Average Pooling ---
-        # Average over time dimension
-        feature = self.global_pool(output)  # (Batch, hidden*directions)
+        if self.rnn_type == "transformer":
+            # Projection -> Positional Encoding -> Transformer
+            x = self.input_proj(x)  # (Batch, Time', d_model)
+            x = self.pos_encoder(x)
+            output = self.sequence_model(x)  # (Batch, Time', d_model)
+        else:
+            # GRU / LSTM
+            self.sequence_model.flatten_parameters()  # Suppress contiguous memory warning
+            output, _ = self.sequence_model(x)
+
+        # --- 3. Global Pooling ---
+        feature = self.global_pool(output)
 
         # --- 4. Classification ---
         logits = self.head(feature)
@@ -414,12 +474,17 @@ def get_model(
         rnn_bidirectional: Whether to use bidirectional RNN
         mlp_hidden_channels: Hidden channels for MLP head
         mlp_dropout: Dropout for MLP head
+        **kwargs: Transformer args (nhead, dim_feedforward)
 
     Returns:
         Configured CMIModel instance
     """
     if branch_configs is None:
         branch_configs = DEFAULT_BRANCH_CONFIGS
+
+    # Extract transformer args from kwargs if present
+    nhead = kwargs.get("nhead", 4)
+    dim_feedforward = kwargs.get("dim_feedforward", 512)
 
     return CMIModel(
         branch_configs=branch_configs,
@@ -431,4 +496,6 @@ def get_model(
         rnn_bidirectional=rnn_bidirectional,
         mlp_hidden_channels=mlp_hidden_channels,
         mlp_dropout=mlp_dropout,
+        nhead=nhead,
+        dim_feedforward=dim_feedforward,
     )

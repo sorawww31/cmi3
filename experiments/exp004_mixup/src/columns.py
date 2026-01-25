@@ -26,7 +26,11 @@ class FeatureGroup:
 FEATURE_GROUPS: dict[str, FeatureGroup] = {
     "rot": FeatureGroup(
         "rot",
-        ["rot_x", "rot_y", "rot_z", "rot_w"],  # , "roll", "pitch", "yaw"]
+        ["rot_x", "rot_y", "rot_z", "rot_w"],
+    ),
+    "euler": FeatureGroup(
+        "euler",
+        ["roll", "pitch", "yaw"],
     ),
     "imu": FeatureGroup(
         "imu",
@@ -34,18 +38,26 @@ FEATURE_GROUPS: dict[str, FeatureGroup] = {
             "linear_acc_x",
             "linear_acc_y",
             "linear_acc_z",
+        ],
+    ),
+    "acc2": FeatureGroup(
+        "acc2",
+        [
+            "acc_x2",
+            "acc_y2",
+            "acc_z2",
+        ],
+    ),
+    "angular_vel": FeatureGroup(
+        "angular_vel",
+        [
             "angular_vel_x",
             "angular_vel_y",
             "angular_vel_z",
             "angular_dist",
-            "jerk_x",
-            "jerk_y",
-            "jerk_z",
-            # "acc_x2",
-            # "acc_y2",
-            # "acc_z2",
         ],
     ),
+    "jerk": FeatureGroup("jerk", ["jerk_x", "jerk_y", "jerk_z"]),
     "thm": FeatureGroup("thm", [f"thm_{i}" for i in range(1, 6)]),
     "tof": FeatureGroup(
         "tof", [f"tof_{i}_v{j}" for i in range(1, 6) for j in range(64)]

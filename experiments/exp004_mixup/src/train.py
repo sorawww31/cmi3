@@ -153,7 +153,7 @@ def train_one_epoch(
     pbar = tqdm(train_loader, desc="Training", leave=False)
     for batch in pbar:
         data = batch["data"].to(device)
-        labels = batch["label"].to(device)
+        labels = batch["label"].to(device)  # Mixupの場合はSoft Label (float)
 
         optimizer.zero_grad()
 
@@ -161,7 +161,7 @@ def train_one_epoch(
         loss = criterion(logits, labels)
 
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        # torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
 
         # Update EMA after each step
@@ -175,7 +175,18 @@ def train_one_epoch(
 
         preds = torch.argmax(logits, dim=1)
         all_preds.extend(preds.cpu().numpy())
-        all_labels.extend(labels.cpu().numpy())
+
+        # F1スコア計算にはオリジナルのラベルを使用 (mixup時は label_origin)
+        if "label_origin" in batch:
+            original_labels = batch["label_origin"]
+            all_labels.extend(original_labels.cpu().numpy())
+        else:
+            # Fallback for validation or if mixup not used
+            # If labels are soft (dim=2), convert to hard
+            if labels.dim() > 1:
+                all_labels.extend(torch.argmax(labels, dim=1).cpu().numpy())
+            else:
+                all_labels.extend(labels.cpu().numpy())
 
         pbar.set_postfix({"loss": loss.item()})
 
