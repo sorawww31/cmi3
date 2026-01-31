@@ -31,6 +31,90 @@ class BranchConfig:
         return len(self.columns)
 
 
+class SEBlock(nn.Module):
+    def __init__(self, channels, reduction=8):
+        super().__init__()
+        self.squeeze = nn.AdaptiveAvgPool1d(1)
+        self.excitation = nn.Sequential(
+            nn.Linear(channels, channels // reduction, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Linear(channels // reduction, channels, bias=False),
+            nn.Sigmoid(),
+        )
+
+    def forward(self, x):
+        b, c, _ = x.size()
+        y = self.squeeze(x).view(b, c)
+        y = self.excitation(y).view(b, c, 1)
+        return x * y.expand_as(x)
+
+
+class ResidualSECNNBlock(nn.Module):
+    def __init__(
+        self,
+        in_channels,
+        out_channels,
+        kernel_size,
+        pool_size=2,
+        dropout=0.3,
+        weight_decay=1e-4,
+    ):
+        super().__init__()
+
+        # First conv block
+        self.conv1 = nn.Conv1d(
+            in_channels, out_channels, kernel_size, padding=kernel_size // 2, bias=False
+        )
+        self.bn1 = nn.BatchNorm1d(out_channels)
+
+        # Second conv block
+        self.conv2 = nn.Conv1d(
+            out_channels,
+            out_channels,
+            kernel_size,
+            padding=kernel_size // 2,
+            bias=False,
+        )
+        self.bn2 = nn.BatchNorm1d(out_channels)
+
+        # SE block
+        self.se = SEBlock(out_channels)
+
+        # Shortcut connection
+        self.shortcut = nn.Sequential()
+        if in_channels != out_channels:
+            self.shortcut = nn.Sequential(
+                nn.Conv1d(in_channels, out_channels, 1, bias=False),
+                nn.BatchNorm1d(out_channels),
+            )
+        if pool_size > 1:
+            self.pool = nn.MaxPool1d(pool_size)
+        else:
+            self.pool = nn.Identity()
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x):
+        shortcut = self.shortcut(x)
+
+        # First conv
+        out = F.relu(self.bn1(self.conv1(x)))
+        # Second conv
+        out = self.bn2(self.conv2(out))
+
+        # SE block
+        out = self.se(out)
+
+        # Add shortcut
+        out += shortcut
+        out = F.relu(out)
+
+        # Pool and dropout
+        out = self.pool(out)
+        out = self.dropout(out)
+
+        return out
+
+
 class AttentionPooling(nn.Module):
     def __init__(self, input_dim):
         super().__init__()
@@ -147,16 +231,9 @@ class IMUBranch(nn.Module):
         in_ch = config.input_channels
 
         self.encoder = nn.Sequential(
-            Conv1DBlock(in_ch, config.hidden_channels[0], config.kernel_size),
-            Conv1DBlock(
-                config.hidden_channels[0], config.hidden_channels[1], config.kernel_size
-            ),
-            Conv1DBlock(
-                config.hidden_channels[1], config.hidden_channels[2], config.kernel_size
-            ),
-            nn.AdaptiveAvgPool1d(2),
-            Conv1DBlock(
-                config.hidden_channels[2], config.hidden_channels[3], config.kernel_size
+            ResidualSECNNBlock(in_ch, config.hidden_channels[0], config.kernel_size, pool_size=0),
+            ResidualSECNNBlock(
+                config.hidden_channels[0], config.hidden_channels[1], config.kernel_size, pool_size=2
             ),
             nn.Dropout1d(p=0.2),
         )
@@ -164,7 +241,8 @@ class IMUBranch(nn.Module):
     @property
     def output_channels(self) -> int:
         """Returns the output channel size of this branch."""
-        return self.config.hidden_channels[-1]
+        # Encoder uses 2 ResidualSECNNBlocks, output is hidden_channels[1]
+        return self.config.hidden_channels[1]
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -307,14 +385,8 @@ class CMIModel(nn.Module):
         # --- 1. Feature Branch Encoders ---
         self.branches = nn.ModuleDict()
         for cfg in branch_configs:
-            if cfg.name == "imu":
-                self.branches[cfg.name] = IMUBranch(cfg)
-            # elif cfg.name == "acc2":
-            #     self.branches[cfg.name] = Acc2Branch(cfg)
-            # elif cfg.name == "thm":
-            #     self.branches[cfg.name] = ThmBranch(cfg)
-            # elif cfg.name == "tof":
-            #     self.branches[cfg.name] = TofBranch(cfg)
+            # Use IMUBranch for all feature groups
+            self.branches[cfg.name] = IMUBranch(cfg)
 
         total_encoder_channels = sum(
             branch.output_channels for branch in self.branches.values()

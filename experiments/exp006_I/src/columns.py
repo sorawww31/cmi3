@@ -24,9 +24,9 @@ class FeatureGroup:
 # ============================================================================
 
 FEATURE_GROUPS: dict[str, FeatureGroup] = {
-    "rot2": FeatureGroup(
-        "rot2",
-        [],
+    "rot": FeatureGroup(
+        "rot",
+        ["rot_x", "rot_y", "rot_z", "rot_w", "rot_angle", "rot_angle_vel"],  # , "roll", "pitch", "yaw"]
     ),
     "euler": FeatureGroup(
         "euler",
@@ -35,33 +35,35 @@ FEATURE_GROUPS: dict[str, FeatureGroup] = {
     "imu": FeatureGroup(
         "imu",
         [
-            "acc_x",
-            "acc_y",
-            "acc_z",
             "linear_acc_x",
             "linear_acc_y",
             "linear_acc_z",
-            "rot_x",
-            "rot_y",
-            "rot_z",
-            "rot_w",
-            "rot_angle",
-            "rot_angle_vel",
-            "angular_vel_x",
-            "angular_vel_y",
-            "angular_vel_z",
-            "angular_dist",
+        ],
+    ),
+    "jerk": FeatureGroup(
+        "jerk",
+        [
             "jerk_x",
             "jerk_y",
             "jerk_z",
         ],
     ),
-    "acc2": FeatureGroup(
-        "acc2",
+    "angular_vel": FeatureGroup(
+        "angular_vel",
         [
-            "acc_x2",
-            "acc_y2",
-            "acc_z2",
+            "angular_vel_x",
+            "angular_vel_y",
+            "angular_vel_z",
+            "angular_dist",
+        ],
+    ),
+    "magnitude": FeatureGroup(
+        "magnitude",
+        [
+            "acc_mag",
+            "linear_acc_mag",
+            "angular_vel_mag",
+            "jerk_mag",
         ],
     ),
     "thm": FeatureGroup("thm", [f"thm_{i}" for i in range(1, 6)]),
@@ -125,7 +127,6 @@ def build_branch_configs(
                     num_ch * hidden_multiplier,
                     num_ch * hidden_multiplier * 2,
                     num_ch * hidden_multiplier * 4,
-                    num_ch * hidden_multiplier * 8,
                 ],
             )
         )

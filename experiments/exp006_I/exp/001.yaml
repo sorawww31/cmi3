@@ -4,4 +4,12 @@ defaults:
 
 seed: 42
 folds: [0]
-epochs: 100
+epochs: 150
+learning_rate: 3e-4
+weight_decay: 3e-4
+batch_size: 256
+rnn_type: "gru"
+rnn_num_layers: 2
+branch_hidden_multiplier: 2
+features: ["imu", "rot", "angular_vel", "jerk"]
+patience: 20

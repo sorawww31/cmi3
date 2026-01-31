@@ -211,6 +211,9 @@ def main(cfg: Config) -> None:
                 max_length=cfg.exp.max_length,
                 sensor_cols=sensor_cols,
                 num_workers=cfg.exp.num_workers,
+                mixup_alpha=cfg.exp.mixup_alpha,
+                cutmix_alpha=cfg.exp.cutmix_alpha,
+                mixup_rate=cfg.exp.mixup_rate,
             )
 
         # Create model

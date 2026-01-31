@@ -4,12 +4,16 @@ defaults:
 
 seed: 42
 folds: [0]
-epochs: 100
-learning_rate: 3e-4
+epochs: 200
+learning_rate: 1e-3
 weight_decay: 3e-4
-batch_size: 64
-rnn_type: "transformer"
+ema_decay: 0.999
+batch_size: 256
+mixup_rate: 0.7
+rnn_type: "gru"
+optimizer_name: "adamw"
+warmup_epochs: 10
 rnn_num_layers: 2
 branch_hidden_multiplier: 2
-features: ["imu","rot", "angular_vel", "jerk"]
+features: ["imu", "rot", "angular_vel", "jerk", "magnitude"]
 patience: 20

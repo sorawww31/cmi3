@@ -148,7 +148,9 @@ class CMIDataset(Dataset):
         sequence_ids: list[int],
         metadata: dict[int, dict],
         is_train: bool = True,
-        alpha: float = 0.3,
+        mixup_alpha: float = 0.4,
+        cutmix_alpha: float = 0.4,
+        mixup_rate: float = 0.5,
         transforms: SignalTransform | None = None,
     ):
         """
@@ -157,14 +159,18 @@ class CMIDataset(Dataset):
             sequence_ids: 使用するシーケンスIDのリスト
             metadata: シーケンスIDをキーとするメタデータ辞書
             is_train: 訓練モードかどうか
-            alpha: Mixup parameter for Beta distribution
+            mixup_alpha: Beta distribution parameter for Mixup
+            cutmix_alpha: Beta distribution parameter for Cutmix
+            mixup_rate: Probability of using Mixup vs Cutmix (0.6 = 60% Mixup, 40% Cutmix)
             transforms: Data augmentation transforms
         """
         self.data_array = data_array
         self.sequence_ids = sequence_ids
         self.metadata = metadata
         self.is_train = is_train
-        self.alpha = alpha
+        self.mixup_alpha = mixup_alpha
+        self.cutmix_alpha = cutmix_alpha
+        self.mixup_rate = mixup_rate
         self.transforms = transforms
         self.num_classes = len(TARGET_GESTURES) + len(NON_TARGET_GESTURES)
 
@@ -183,30 +189,62 @@ class CMIDataset(Dataset):
 
         return data, label_idx, seq_id
 
+    def _apply_cutmix(
+        self,
+        X: np.ndarray,
+        X2: np.ndarray,
+        lam: float,
+    ) -> tuple[np.ndarray, float]:
+        """
+        時系列Cutmix: ランダムな連続時間区間を別サンプルで置換
+
+        Args:
+            X: オリジナルデータ (max_length, n_features)
+            X2: 置換用データ (max_length, n_features)
+            lam: Beta分布からサンプリングされた混合比率
+
+        Returns:
+            X_cutmix: Cutmix適用後のデータ
+            lam_adjusted: 実際の混合比率（切り取り区間長に基づく）
+        """
+        seq_len = X.shape[0]
+
+        # Cut区間の長さを決定 (1-lam の比率を切り取る)
+        cut_len = int(seq_len * (1 - lam))
+        if cut_len == 0:
+            return X.copy(), 1.0
+        if cut_len >= seq_len:
+            return X2.copy(), 0.0
+
+        # ランダムな開始位置
+        cut_start = np.random.randint(0, seq_len - cut_len + 1)
+        cut_end = cut_start + cut_len
+
+        # Cutmix適用
+        X_cutmix = X.copy()
+        X_cutmix[cut_start:cut_end] = X2[cut_start:cut_end]
+
+        # 実際の混合比率を計算
+        lam_adjusted = 1 - (cut_len / seq_len)
+
+        return X_cutmix, lam_adjusted
+
     def __getitem__(self, idx: int) -> dict:
         # Default behavior (no mixup or val)
         X, y_idx, seq_id = self._get_data(idx)
 
-        # Apply augmentation if available (only on is_train usually, but handled by is_train flag in creation or passed transforms)
+        # Apply augmentation if available
         if self.is_train and self.transforms:
             X = self.transforms(X)
 
-        # Determine if we should apply mixup
-        # ユーザー参照コード: p <= 0.0 -> Original, Else -> Mixup
-        # np.random.rand() returns [0, 1), so p <= 0.0 only if p=0. basically always Mixup.
-        # We will follow this logic for 'train' mode.
-
-        do_mixup = False
-        if self.is_train and self.alpha > 0:
+        # Determine if we should apply mixup/cutmix
+        do_mix = False
+        if self.is_train and (self.mixup_alpha > 0 or self.cutmix_alpha > 0):
             p = np.random.rand()
-            if (
-                p > 0.0
-            ):  # Reference logic inverted: if p <= 0.0 -> straight. Else -> mix.
-                do_mixup = True
+            if p > 0.0:  # Almost always mix when alpha > 0
+                do_mix = True
 
-        if do_mixup:
-            # Mixup
-            lam = np.random.beta(self.alpha, self.alpha)
+        if do_mix:
             j = np.random.randint(0, len(self.sequence_ids))
 
             X2, y2_idx, _ = self._get_data(j)
@@ -214,9 +252,24 @@ class CMIDataset(Dataset):
             if self.is_train and self.transforms:
                 X2 = self.transforms(X2)
 
-            # Mix Data
-            # X, X2 are pre-padded numpy arrays of same shape (max_len, features)
-            X_mixed = lam * X + (1 - lam) * X2
+            # Choose Mixup or Cutmix based on mixup_rate
+            # mixup_rate=0.6 -> 60% Mixup, 40% Cutmix
+            use_mixup = np.random.rand() < self.mixup_rate
+
+            if use_mixup and self.mixup_alpha > 0:
+                # Mixup: 線形補間
+                lam = np.random.beta(self.mixup_alpha, self.mixup_alpha)
+                X_mixed = lam * X + (1 - lam) * X2
+                lam_final = lam
+            elif self.cutmix_alpha > 0:
+                # Cutmix: 時系列区間置換
+                lam = np.random.beta(self.cutmix_alpha, self.cutmix_alpha)
+                X_mixed, lam_final = self._apply_cutmix(X, X2, lam)
+            else:
+                # Fallback to mixup if cutmix_alpha is 0
+                lam = np.random.beta(self.mixup_alpha, self.mixup_alpha)
+                X_mixed = lam * X + (1 - lam) * X2
+                lam_final = lam
 
             # Mix Labels (One-hot)
             y_onehot = np.zeros(self.num_classes, dtype=np.float32)
@@ -225,7 +278,7 @@ class CMIDataset(Dataset):
             y2_onehot = np.zeros(self.num_classes, dtype=np.float32)
             y2_onehot[y2_idx] = 1.0
 
-            y_mixed = lam * y_onehot + (1 - lam) * y2_onehot
+            y_mixed = lam_final * y_onehot + (1 - lam_final) * y2_onehot
 
             result = {
                 "sequence_id": seq_id,
@@ -236,7 +289,7 @@ class CMIDataset(Dataset):
                 ),  # Hard label for metrics
             }
 
-            # is_target (Optional: can mix or just take original? usually just keep original for tracking)
+            # is_target (keep original for tracking)
             is_target = IDX_TO_GESTURE[y_idx] in TARGET_GESTURES
             result["is_target"] = torch.tensor(is_target, dtype=torch.float32)
 
@@ -265,6 +318,9 @@ def create_dataloaders(
     max_length: int = 500,
     sensor_cols: list[str] = [],
     num_workers: int = 4,
+    mixup_alpha: float = 0.4,
+    cutmix_alpha: float = 0.4,
+    mixup_rate: float = 0.5,
 ) -> tuple:
     """
     訓練・検証用のDataLoaderを作成（メモリ最適化版）
@@ -306,13 +362,13 @@ def create_dataloaders(
         [
             OneOf(
                 [
-                    GaussianNoise(p=0, max_noise_amplitude=0.05),
-                    PinkNoiseSNR(p=0.0, min_snr=4.0, max_snr=20.0),
-                    ButterFilter(p=0.0),
+                    GaussianNoise(p=0.2, max_noise_amplitude=0.05),
+                    PinkNoiseSNR(p=0.2, min_snr=4.0, max_snr=20.0),
+                    ButterFilter(p=0.2),
                 ]
             ),
-            TimeShift(p=0.1, padding_mode="zero", max_shift_pct=0.25),
-            TimeStretch(p=0.1, max_rate=1.5, min_rate=0.5),
+            TimeShift(p=0.3, padding_mode="zero", max_shift_pct=0.25),
+            TimeStretch(p=0.3, max_rate=1.5, min_rate=0.5),
         ]
     )
 
@@ -321,10 +377,20 @@ def create_dataloaders(
         train_ids,
         train_metadata,
         is_train=True,
-        alpha=0.4,
+        mixup_alpha=mixup_alpha,
+        cutmix_alpha=cutmix_alpha,
+        mixup_rate=mixup_rate,
         transforms=train_transforms,
     )
-    val_dataset = CMIDataset(val_data, val_ids, val_metadata, is_train=True, alpha=0.0)
+    val_dataset = CMIDataset(
+        val_data,
+        val_ids,
+        val_metadata,
+        is_train=True,
+        mixup_alpha=0.0,
+        cutmix_alpha=0.0,
+        mixup_rate=0.0,
+    )
 
     train_loader = DataLoader(
         train_dataset,

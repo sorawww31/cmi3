@@ -14,7 +14,6 @@ from timm.utils.model_ema import ModelEmaV3
 from torch.optim import Adam, AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 from torch.utils.data import DataLoader
-from tqdm import tqdm
 
 import wandb
 
@@ -63,7 +62,6 @@ def get_optimizer(
     optimizer_name: str,
     learning_rate: float,
     weight_decay: float,
-    warmup_steps: int = 100,
 ) -> torch.optim.Optimizer:
     """Optimizer factory function."""
     if optimizer_name == "adam":
@@ -91,7 +89,8 @@ def get_optimizer(
 def get_scheduler(
     optimizer: torch.optim.Optimizer,
     total_steps: int,
-    warmup_steps: int,
+    warmup_epochs: int,
+    steps_per_epoch: int,
 ) -> Optional[Any]:
     """Get warmup + cosine annealing scheduler.
 
@@ -100,6 +99,9 @@ def get_scheduler(
     if isinstance(optimizer, RAdamScheduleFree):
         # RAdamScheduleFree handles scheduling internally
         return None
+
+    # Calculate warmup steps from epochs
+    warmup_steps = warmup_epochs * steps_per_epoch
 
     # Warmup scheduler
     warmup_scheduler = LinearLR(
@@ -150,8 +152,7 @@ def train_one_epoch(
     all_preds = []
     all_labels = []
 
-    pbar = tqdm(train_loader, desc="Training", leave=False)
-    for batch in pbar:
+    for batch in train_loader:
         data = batch["data"].to(device)
         labels = batch["label"].to(device)  # Mixupの場合はSoft Label (float)
 
@@ -188,8 +189,6 @@ def train_one_epoch(
             else:
                 all_labels.extend(labels.cpu().numpy())
 
-        pbar.set_postfix({"loss": loss.item()})
-
     avg_loss = total_loss / len(train_loader.dataset)  # type: ignore
     f1_score = compute_hierarchical_f1(all_labels, all_preds)
 
@@ -215,8 +214,7 @@ def validate(
     all_preds = []
     all_labels = []
 
-    pbar = tqdm(val_loader, desc="Validation", leave=False)
-    for batch in pbar:
+    for batch in val_loader:
         data = batch["data"].to(device)
         labels = batch["label"].to(device)
 
@@ -255,15 +253,16 @@ def train_fold(
         optimizer_name=cfg.exp.optimizer_name,
         learning_rate=cfg.exp.learning_rate,
         weight_decay=cfg.exp.weight_decay,
-        warmup_steps=cfg.exp.warmup_steps,
     )
 
     # Get scheduler (None for RAdamScheduleFree)
-    total_steps = len(train_loader) * cfg.exp.epochs
+    steps_per_epoch = len(train_loader)
+    total_steps = steps_per_epoch * cfg.exp.epochs
     scheduler = get_scheduler(
         optimizer=optimizer,
         total_steps=total_steps,
-        warmup_steps=cfg.exp.warmup_steps,
+        warmup_epochs=cfg.exp.warmup_epochs,
+        steps_per_epoch=steps_per_epoch,
     )
 
     # Initialize EMA
@@ -274,7 +273,8 @@ def train_fold(
 
     logger.info(f"Optimizer: {cfg.exp.optimizer_name}")
     if scheduler is not None:
-        logger.info(f"Scheduler: warmup({cfg.exp.warmup_steps}) + cosine")
+        warmup_steps = cfg.exp.warmup_epochs * steps_per_epoch
+        logger.info(f"Scheduler: warmup({cfg.exp.warmup_epochs} epochs = {warmup_steps} steps) + cosine")
     else:
         logger.info("Scheduler: internal (RAdamScheduleFree)")
 
@@ -371,7 +371,7 @@ def inference(
     all_preds = []
     all_probs = []
 
-    for batch in tqdm(data_loader, desc="Inference"):
+    for batch in data_loader:
         data = batch["data"].to(device)
         logits = model(data)
         probs = torch.softmax(logits, dim=1)

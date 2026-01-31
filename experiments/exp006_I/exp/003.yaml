@@ -3,6 +3,14 @@ defaults:
   - default@_here_  # defaultの値を設定してから上書きする
 
 seed: 42
-folds: [0]
-epochs: 100
-rnn_hidden_size: 64
+folds: [0, 1, 2, 3, 4]
+epochs: 300
+learning_rate: 1e-3
+weight_decay: 3e-4
+ema_decay: 0.99
+batch_size: 512
+rnn_type: "gru"
+rnn_num_layers: 2
+branch_hidden_multiplier: 2
+features: ["imu", "rot", "angular_vel", "jerk"]
+patience: 20

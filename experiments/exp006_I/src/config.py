@@ -24,6 +24,13 @@ class ExpConfig:
     # Available: imu, euler, linear_acc, angular_vel, angular_dist, thm, tof
     features: list[str] = field(default_factory=lambda: ["imu", "rot"])
 
+    # Data Augmentation
+    mixup_alpha: float = 0.4  # Beta distribution parameter for Mixup
+    cutmix_alpha: float = 1.0  # Beta distribution parameter for Cutmix
+    mixup_rate: float = (
+        1.0  # Probability of Mixup vs Cutmix (0.6 = 60% Mixup, 40% Cutmix)
+    )
+
     # Model Architecture
     model_name: str = "cmi"
 
@@ -49,7 +56,7 @@ class ExpConfig:
 
     # Optimizer: adam, adamw, radam_schedule_free
     optimizer_name: str = "radam_schedule_free"
-    warmup_steps: int = 100
+    warmup_epochs: int = 1
 
     # EMA (Exponential Moving Average)
     use_ema: bool = True
