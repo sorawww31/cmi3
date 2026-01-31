@@ -40,7 +40,7 @@ from src.dataset import (  # noqa: E402
     create_dataloaders,
     load_train_data,
 )
-from src.models import get_model, resolve_branch_indices  # noqa: E402
+from src.models import get_model  # noqa: E402
 from src.train import train_fold  # noqa: E402
 from src.utils import count_parameters, get_device, set_seed  # noqa: E402
 
@@ -222,15 +222,13 @@ def main(cfg: Config) -> None:
 
         # Generate configs from centralized definitions
         branch_configs = build_branch_configs(group_names, hidden_multiplier=mult)
-
-        # Resolve channel indices based on actual sensor_cols order
-        branch_configs = resolve_branch_indices(branch_configs, sensor_cols)
-        LOGGER.info(f"Branch configs resolved for {len(branch_configs)} branches")
+        LOGGER.info(f"Branch configs created for {len(branch_configs)} branches")
 
         model = get_model(
             model_name=cfg.exp.model_name,
             num_classes=num_classes,
             branch_configs=branch_configs,
+            sensor_cols=sensor_cols,
             rnn_type=cfg.exp.rnn_type,
             rnn_hidden_size=cfg.exp.rnn_hidden_size,
             rnn_num_layers=cfg.exp.rnn_num_layers,

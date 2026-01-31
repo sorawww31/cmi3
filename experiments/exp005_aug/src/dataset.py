@@ -311,8 +311,8 @@ def create_dataloaders(
                     ButterFilter(p=0.0),
                 ]
             ),
-            TimeShift(p=0.0, padding_mode="zero", max_shift_pct=0.25),
-            TimeStretch(p=0.0, max_rate=1.5, min_rate=0.5),
+            TimeShift(p=0.1, padding_mode="zero", max_shift_pct=0.25),
+            TimeStretch(p=0.1, max_rate=1.5, min_rate=0.5),
         ]
     )
 

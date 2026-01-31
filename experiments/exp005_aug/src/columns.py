@@ -24,13 +24,9 @@ class FeatureGroup:
 # ============================================================================
 
 FEATURE_GROUPS: dict[str, FeatureGroup] = {
-    "rot": FeatureGroup(
-        "rot",
-        ["rot_x", "rot_y", "rot_z", "rot_w"],  # , "rot_angle", "rot_angle_vel"],
-    ),
     "rot2": FeatureGroup(
         "rot2",
-        ["rot_angle", "rot_angle_vel"],
+        [],
     ),
     "euler": FeatureGroup(
         "euler",
@@ -39,9 +35,25 @@ FEATURE_GROUPS: dict[str, FeatureGroup] = {
     "imu": FeatureGroup(
         "imu",
         [
+            "acc_x",
+            "acc_y",
+            "acc_z",
             "linear_acc_x",
             "linear_acc_y",
             "linear_acc_z",
+            "rot_x",
+            "rot_y",
+            "rot_z",
+            "rot_w",
+            "rot_angle",
+            "rot_angle_vel",
+            "angular_vel_x",
+            "angular_vel_y",
+            "angular_vel_z",
+            "angular_dist",
+            "jerk_x",
+            "jerk_y",
+            "jerk_z",
         ],
     ),
     "acc2": FeatureGroup(
@@ -52,16 +64,6 @@ FEATURE_GROUPS: dict[str, FeatureGroup] = {
             "acc_z2",
         ],
     ),
-    "angular_vel": FeatureGroup(
-        "angular_vel",
-        [
-            "angular_vel_x",
-            "angular_vel_y",
-            "angular_vel_z",
-            "angular_dist",
-        ],
-    ),
-    "jerk": FeatureGroup("jerk", ["jerk_x", "jerk_y", "jerk_z"]),
     "thm": FeatureGroup("thm", [f"thm_{i}" for i in range(1, 6)]),
     "tof": FeatureGroup(
         "tof", [f"tof_{i}_v{j}" for i in range(1, 6) for j in range(64)]
@@ -123,6 +125,7 @@ def build_branch_configs(
                     num_ch * hidden_multiplier,
                     num_ch * hidden_multiplier * 2,
                     num_ch * hidden_multiplier * 4,
+                    num_ch * hidden_multiplier * 8,
                 ],
             )
         )

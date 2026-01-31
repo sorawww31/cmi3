@@ -17,7 +17,6 @@ class BranchConfig:
         hidden_channels: List of hidden channel sizes for each Conv1D layer
         kernel_size: Kernel size for Conv1D layers
         pool_size: Pooling size for AvgPool1d layers between Conv blocks
-        channel_indices: Tuple of (start, end) indices (auto-computed from columns)
     """
 
     name: str
@@ -25,7 +24,6 @@ class BranchConfig:
     hidden_channels: list[int] = field(default_factory=lambda: [16, 32, 64])
     kernel_size: int = 3
     pool_size: int = 2
-    channel_indices: tuple[int, int] | None = None  # Set by resolve_branch_indices()
 
     @property
     def input_channels(self) -> int:
@@ -137,7 +135,7 @@ class AttentionPooling1d(nn.Module):
         return output
 
 
-class FeatureBranch(nn.Module):
+class IMUBranch(nn.Module):
     """Dynamic feature branch encoder using Conv1D blocks.
 
     Creates a sequence of Conv1DBlocks with pooling layers based on config.
@@ -146,19 +144,22 @@ class FeatureBranch(nn.Module):
     def __init__(self, config: BranchConfig):
         super().__init__()
         self.config = config
-
-        layers = []
         in_ch = config.input_channels
 
-        for i, out_ch in enumerate(config.hidden_channels):
-            layers.append(Conv1DBlock(in_ch, out_ch, kernel_size=config.kernel_size))
-            # Add pooling after each layer except the last
-            if i < len(config.hidden_channels) - 1:
-                layers.append(nn.AvgPool1d(config.pool_size))
-                # layers.append(AttentionPooling1d(out_ch, config.kernel_size))
-            in_ch = out_ch
-
-        self.encoder = nn.Sequential(*layers)
+        self.encoder = nn.Sequential(
+            Conv1DBlock(in_ch, config.hidden_channels[0], config.kernel_size),
+            Conv1DBlock(
+                config.hidden_channels[0], config.hidden_channels[1], config.kernel_size
+            ),
+            Conv1DBlock(
+                config.hidden_channels[1], config.hidden_channels[2], config.kernel_size
+            ),
+            nn.AdaptiveAvgPool1d(2),
+            Conv1DBlock(
+                config.hidden_channels[2], config.hidden_channels[3], config.kernel_size
+            ),
+            nn.Dropout1d(p=0.2),
+        )
 
     @property
     def output_channels(self) -> int:
@@ -252,6 +253,7 @@ class CMIModel(nn.Module):
 
     Args:
         branch_configs: List of BranchConfig for each feature group
+        sensor_cols: Ordered list of all sensor column names in the input data
         num_classes: Number of output classes
         rnn_type: Type of RNN layer ("gru", "lstm", "transformer")
         rnn_hidden_size: Hidden size for RNN layer (d_model for Transformer)
@@ -267,6 +269,7 @@ class CMIModel(nn.Module):
     def __init__(
         self,
         branch_configs: list[BranchConfig],
+        sensor_cols: list[str],
         num_classes: int = 18,
         rnn_type: Literal["gru", "lstm", "transformer"] = "transformer",
         rnn_hidden_size: int = 128,  # d_model for Transformer
@@ -285,10 +288,33 @@ class CMIModel(nn.Module):
         self.rnn_type = rnn_type.lower()
         self.rnn_bidirectional = rnn_bidirectional
 
+        # Build column name to index mapping
+        col_to_idx = {col: idx for idx, col in enumerate(sensor_cols)}
+
+        # Compute branch column indices (supports non-contiguous columns)
+        self.branch_col_indices: dict[str, list[int]] = {}
+        for cfg in branch_configs:
+            indices = []
+            for col in cfg.columns:
+                if col not in col_to_idx:
+                    raise ValueError(
+                        f"Column '{col}' in branch '{cfg.name}' not found in sensor_cols. "
+                        f"Available: {sensor_cols}"
+                    )
+                indices.append(col_to_idx[col])
+            self.branch_col_indices[cfg.name] = indices
+
         # --- 1. Feature Branch Encoders ---
-        self.branches = nn.ModuleDict(
-            {cfg.name: FeatureBranch(cfg) for cfg in branch_configs}
-        )
+        self.branches = nn.ModuleDict()
+        for cfg in branch_configs:
+            if cfg.name == "imu":
+                self.branches[cfg.name] = IMUBranch(cfg)
+            # elif cfg.name == "acc2":
+            #     self.branches[cfg.name] = Acc2Branch(cfg)
+            # elif cfg.name == "thm":
+            #     self.branches[cfg.name] = ThmBranch(cfg)
+            # elif cfg.name == "tof":
+            #     self.branches[cfg.name] = TofBranch(cfg)
 
         total_encoder_channels = sum(
             branch.output_channels for branch in self.branches.values()
@@ -353,13 +379,8 @@ class CMIModel(nn.Module):
         encoded_features = []
         for cfg in self.branch_configs:
             branch = self.branches[cfg.name]
-            if cfg.channel_indices is None:
-                raise RuntimeError(
-                    f"channel_indices not set for branch '{cfg.name}'. "
-                    "Call resolve_branch_indices() before creating the model."
-                )
-            start, end = cfg.channel_indices
-            branch_input = x[:, start:end, :]  # (Batch, branch_channels, Time)
+            indices = self.branch_col_indices[cfg.name]
+            branch_input = x[:, indices, :]  # (Batch, branch_channels, Time)
             encoded = branch(branch_input)  # (Batch, output_channels, Time')
             encoded_features.append(encoded)
 
@@ -406,51 +427,35 @@ DEFAULT_BRANCH_CONFIGS = [
 ]
 
 
-def resolve_branch_indices(
+def validate_branch_columns(
     branch_configs: list[BranchConfig],
     sensor_cols: list[str],
-) -> list[BranchConfig]:
-    """Resolve channel_indices for each BranchConfig based on sensor column order.
+) -> None:
+    """Validate that all branch columns exist in sensor_cols.
 
     Args:
         branch_configs: List of BranchConfig with column names defined
         sensor_cols: Ordered list of all sensor columns used in the dataset
 
-    Returns:
-        Updated list of BranchConfig with channel_indices set
-
     Raises:
         ValueError: If a column in branch_configs is not found in sensor_cols
     """
-    col_to_idx = {col: idx for idx, col in enumerate(sensor_cols)}
+    sensor_set = set(sensor_cols)
 
     for cfg in branch_configs:
-        # Find start and end indices for this branch's columns
-        indices = []
         for col in cfg.columns:
-            if col not in col_to_idx:
+            if col not in sensor_set:
                 raise ValueError(
                     f"Column '{col}' in branch '{cfg.name}' not found in sensor_cols. "
                     f"Available: {sensor_cols}"
                 )
-            indices.append(col_to_idx[col])
-
-        # Verify columns are contiguous
-        if indices != list(range(min(indices), max(indices) + 1)):
-            raise ValueError(
-                f"Columns in branch '{cfg.name}' must be contiguous in sensor_cols. "
-                f"Got indices: {indices}"
-            )
-
-        cfg.channel_indices = (min(indices), max(indices) + 1)
-
-    return branch_configs
 
 
 def get_model(
     model_name: str = "cmi",
     num_classes: int = 18,
     branch_configs: list[BranchConfig] | None = None,
+    sensor_cols: list[str] | None = None,
     rnn_type: str = "gru",
     rnn_hidden_size: int = 96,
     rnn_num_layers: int = 2,
@@ -467,6 +472,7 @@ def get_model(
         num_classes: Number of output classes
         branch_configs: List of BranchConfig for feature branches.
                        If None, uses DEFAULT_BRANCH_CONFIGS.
+        sensor_cols: Ordered list of all sensor column names. Required.
         rnn_type: Type of RNN layer ("gru" or "lstm")
         rnn_hidden_size: Hidden size for RNN
         rnn_num_layers: Number of RNN layers
@@ -478,9 +484,18 @@ def get_model(
 
     Returns:
         Configured CMIModel instance
+
+    Raises:
+        ValueError: If sensor_cols is not provided
     """
     if branch_configs is None:
         branch_configs = DEFAULT_BRANCH_CONFIGS
+
+    if sensor_cols is None:
+        raise ValueError("sensor_cols must be provided to get_model()")
+
+    # Validate branch columns exist in sensor_cols
+    validate_branch_columns(branch_configs, sensor_cols)
 
     # Extract transformer args from kwargs if present
     nhead = kwargs.get("nhead", 4)
@@ -488,6 +503,7 @@ def get_model(
 
     return CMIModel(
         branch_configs=branch_configs,
+        sensor_cols=sensor_cols,
         num_classes=num_classes,
         rnn_type=rnn_type,
         rnn_hidden_size=rnn_hidden_size,
