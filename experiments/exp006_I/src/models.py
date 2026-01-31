@@ -48,19 +48,13 @@ class SEBlock(nn.Module):
         y = self.excitation(y).view(b, c, 1)
         return x * y.expand_as(x)
 
+class Conv1DBlock(nn.Module):
+    """1D Convolutional Block with Conv1D, BatchNorm, ReLU"""
 
-class ResidualSECNNBlock(nn.Module):
     def __init__(
-        self,
-        in_channels,
-        out_channels,
-        kernel_size,
-        pool_size=2,
-        dropout=0.3,
-        weight_decay=1e-4,
+        self, in_channels: int, out_channels: int, kernel_size: int, stride: int = 1
     ):
         super().__init__()
-
         # First conv block
         self.conv1 = nn.Conv1d(
             in_channels, out_channels, kernel_size, padding=kernel_size // 2, bias=False
@@ -77,6 +71,32 @@ class ResidualSECNNBlock(nn.Module):
         )
         self.bn2 = nn.BatchNorm1d(out_channels)
 
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.conv1(x)
+        x = self.bn1(x)
+        x = F.relu(x)
+        x = self.conv2(x)
+        x = self.bn2(x)
+        x = F.relu(x)
+        return x
+
+
+class ResidualSECNNBlock(nn.Module):
+    def __init__(
+        self,
+        in_channels,
+        out_channels,
+        kernel_size,
+        pool_size=2,
+        dropout=0.3,
+        weight_decay=1e-4,
+    ):
+        super().__init__()
+
+        self.conv1 = Conv1DBlock(in_channels, out_channels, kernel_size)
+        self.conv2 = Conv1DBlock(in_channels, out_channels, kernel_size+2)
+        # self.conv3 = Conv1DBlock(in_channels, out_channels, kernel_size+4)
+        self.mix = nn.Conv1d(2*out_channels, out_channels, kernel_size=1)
         # SE block
         self.se = SEBlock(out_channels)
 
@@ -96,11 +116,12 @@ class ResidualSECNNBlock(nn.Module):
     def forward(self, x):
         shortcut = self.shortcut(x)
 
-        # First conv
-        out = F.relu(self.bn1(self.conv1(x)))
-        # Second conv
-        out = self.bn2(self.conv2(out))
+        out1 = self.conv1(x) # B, C_in, T -> B, C_out, T
+        out2 = self.conv2(x) # B, C_in, T -> B, C_out, T
+        # out3 = self.conv3(x) # B, C_in, T -> B, C_out, T
 
+        out = torch.cat([out1, out2], dim=1) # B, C_out*2, T
+        out = self.mix(out) # B, C_out, T
         # SE block
         out = self.se(out)
 
@@ -140,28 +161,6 @@ class AttentionPooling(nn.Module):
         return output
 
 
-class Conv1DBlock(nn.Module):
-    """1D Convolutional Block with Conv1D, BatchNorm, ReLU"""
-
-    def __init__(
-        self, in_channels: int, out_channels: int, kernel_size: int, stride: int = 1
-    ):
-        super(Conv1DBlock, self).__init__()
-        self.conv = nn.Conv1d(
-            in_channels,
-            out_channels,
-            kernel_size,
-            padding=kernel_size // 2,
-            stride=stride,
-        )
-        self.bn = nn.BatchNorm1d(out_channels)
-        self.relu = nn.ReLU()
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.conv(x)
-        x = self.bn(x)
-        x = self.relu(x)
-        return x
 
 
 class AttentionPooling1d(nn.Module):
@@ -235,7 +234,6 @@ class IMUBranch(nn.Module):
             ResidualSECNNBlock(
                 config.hidden_channels[0], config.hidden_channels[1], config.kernel_size, pool_size=2
             ),
-            nn.Dropout1d(p=0.2),
         )
 
     @property
@@ -391,7 +389,7 @@ class CMIModel(nn.Module):
         total_encoder_channels = sum(
             branch.output_channels for branch in self.branches.values()
         )
-
+        self.se= SEBlock(total_encoder_channels)
         # --- 2. Sequence Modeling Layer (RNN or Transformer) ---
         if self.rnn_type == "transformer":
             # Transformerには固定のd_modelが必要なので、ブランチ出力を射影する層を追加
@@ -428,6 +426,7 @@ class CMIModel(nn.Module):
         if mlp_hidden_channels is None:
             mlp_hidden_channels = [rnn_output_size // 2]
 
+
         self.global_pool = AttentionPooling(rnn_output_size)
 
         self.head = MLPHead(
@@ -462,7 +461,6 @@ class CMIModel(nn.Module):
         # --- 2. Sequence Modeling ---
         # (Batch, total_channels, Time') -> (Batch, Time', total_channels)
         x = x.transpose(1, 2)
-
         if self.rnn_type == "transformer":
             # Projection -> Positional Encoding -> Transformer
             x = self.input_proj(x)  # (Batch, Time', d_model)

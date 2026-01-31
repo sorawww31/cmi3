@@ -46,7 +46,7 @@ from src.utils import count_parameters, get_device, set_seed  # noqa: E402
 
 from utils.env import EnvConfig  # noqa: E402
 
-load_dotenv()
+load_dotenv(os.path.join(project_root, ".env"))
 LOGGER = None
 
 

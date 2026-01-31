@@ -362,9 +362,9 @@ def create_dataloaders(
         [
             OneOf(
                 [
-                    GaussianNoise(p=0.2, max_noise_amplitude=0.05),
-                    PinkNoiseSNR(p=0.2, min_snr=4.0, max_snr=20.0),
-                    ButterFilter(p=0.2),
+                    GaussianNoise(p=0.1, max_noise_amplitude=0.05),
+                    PinkNoiseSNR(p=0.1, min_snr=4.0, max_snr=20.0),
+                    ButterFilter(p=0.1),
                 ]
             ),
             TimeShift(p=0.3, padding_mode="zero", max_shift_pct=0.25),
