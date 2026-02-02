@@ -48,6 +48,7 @@ class SEBlock(nn.Module):
         y = self.excitation(y).view(b, c, 1)
         return x * y.expand_as(x)
 
+
 class Conv1DBlock(nn.Module):
     """1D Convolutional Block with Conv1D, BatchNorm, ReLU"""
 
@@ -94,9 +95,9 @@ class ResidualSECNNBlock(nn.Module):
         super().__init__()
 
         self.conv1 = Conv1DBlock(in_channels, out_channels, kernel_size)
-        self.conv2 = Conv1DBlock(in_channels, out_channels, kernel_size+2)
+        self.conv2 = Conv1DBlock(in_channels, out_channels, kernel_size + 2)
         # self.conv3 = Conv1DBlock(in_channels, out_channels, kernel_size+4)
-        self.mix = nn.Conv1d(2*out_channels, out_channels, kernel_size=1)
+        self.mix = nn.Conv1d(2 * out_channels, out_channels, kernel_size=1)
         # SE block
         self.se = SEBlock(out_channels)
 
@@ -116,12 +117,12 @@ class ResidualSECNNBlock(nn.Module):
     def forward(self, x):
         shortcut = self.shortcut(x)
 
-        out1 = self.conv1(x) # B, C_in, T -> B, C_out, T
-        out2 = self.conv2(x) # B, C_in, T -> B, C_out, T
+        out1 = self.conv1(x)  # B, C_in, T -> B, C_out, T
+        out2 = self.conv2(x)  # B, C_in, T -> B, C_out, T
         # out3 = self.conv3(x) # B, C_in, T -> B, C_out, T
 
-        out = torch.cat([out1, out2], dim=1) # B, C_out*2, T
-        out = self.mix(out) # B, C_out, T
+        out = torch.cat([out1, out2], dim=1)  # B, C_out*2, T
+        out = self.mix(out)  # B, C_out, T
         # SE block
         out = self.se(out)
 
@@ -159,8 +160,6 @@ class AttentionPooling(nn.Module):
         output = torch.sum(x * weights, dim=1)
 
         return output
-
-
 
 
 class AttentionPooling1d(nn.Module):
@@ -230,10 +229,16 @@ class IMUBranch(nn.Module):
         in_ch = config.input_channels
 
         self.encoder = nn.Sequential(
-            ResidualSECNNBlock(in_ch, config.hidden_channels[0], config.kernel_size, pool_size=0),
             ResidualSECNNBlock(
-                config.hidden_channels[0], config.hidden_channels[1], config.kernel_size, pool_size=2
+                in_ch, config.hidden_channels[0], config.kernel_size, pool_size=0
             ),
+            ResidualSECNNBlock(
+                config.hidden_channels[0],
+                config.hidden_channels[1],
+                config.kernel_size,
+                pool_size=2,
+            ),
+            nn.Dropout1d(p=0.2),
         )
 
     @property
@@ -389,7 +394,7 @@ class CMIModel(nn.Module):
         total_encoder_channels = sum(
             branch.output_channels for branch in self.branches.values()
         )
-        self.se= SEBlock(total_encoder_channels)
+        self.se = SEBlock(total_encoder_channels)
         # --- 2. Sequence Modeling Layer (RNN or Transformer) ---
         if self.rnn_type == "transformer":
             # Transformerには固定のd_modelが必要なので、ブランチ出力を射影する層を追加
@@ -425,7 +430,6 @@ class CMIModel(nn.Module):
         # --- 3. Global Pooling & MLP Head ---
         if mlp_hidden_channels is None:
             mlp_hidden_channels = [rnn_output_size // 2]
-
 
         self.global_pool = AttentionPooling(rnn_output_size)
 
