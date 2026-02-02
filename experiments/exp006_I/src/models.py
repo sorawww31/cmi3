@@ -238,7 +238,7 @@ class IMUBranch(nn.Module):
                 config.kernel_size,
                 pool_size=2,
             ),
-            nn.Dropout1d(p=0.2),
+            # nn.Dropout1d(p=0.2),
         )
 
     @property
