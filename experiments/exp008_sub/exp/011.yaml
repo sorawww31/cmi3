@@ -1,0 +1,19 @@
+# Full training experiment
+defaults:  
+  - default@_here_  # defaultの値を設定してから上書きする
+
+seed: 42
+folds: [0]
+epochs: 230
+learning_rate: 1e-3
+weight_decay: 3e-4
+ema_decay: 0.999
+batch_size: 256
+max_length: 96
+rnn_type: "gru"
+optimizer_name: "adamw"
+warmup_epochs: 10
+rnn_num_layers: 2
+branch_hidden_multiplier: 2
+features: ["imu", "rot", "angular_vel", "jerk", "magnitude", "thm"]
+patience: 20
