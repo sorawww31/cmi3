@@ -69,14 +69,10 @@ def log_config(cfg: Config, logger) -> None:
     )
 
 
-def init_output_dir(cfg: Config):
-    this_file_path = Path(__file__).resolve()
-    cfg.env.output_dir = this_file_path.parent / "outputs"
-    cfg.env.exp_output_dir = (
-        cfg.env.output_dir / HydraConfig.get().runtime.choices["exp"]
-    )
-    output_dir = cfg.env.exp_output_dir
-    os.makedirs(output_dir, exist_ok=True)
+def init_output_dir(cfg: Config, exp_name: str):
+    output_dir = Path(cfg.env.output_dir) / exp_name
+    cfg.env.exp_output_dir = output_dir
+    output_dir.mkdir(parents=True, exist_ok=True)
     return output_dir
 
 
@@ -122,12 +118,12 @@ def prepare_fold_splits(
 @hydra.main(version_base=None, config_path=".", config_name="config")
 def main(cfg: Config) -> None:
     global LOGGER
-    output_dir = init_output_dir(cfg)
+    exp_name = f"{Path(sys.argv[0]).parent.name}/{HydraConfig.get().runtime.choices['exp']}_{cfg.exp.name}"  # e.g. 000_sample/default
+
+    output_dir = init_output_dir(cfg, exp_name)
     LOGGER = get_logger(__name__, output_dir)
     LOGGER.info("output_dir: %s", output_dir)
     LOGGER.info("Start CMI Behavior Detection Training")
-
-    exp_name = f"{Path(sys.argv[0]).parent.name}/{HydraConfig.get().runtime.choices['exp']}_{cfg.exp.name}"
 
     log_config(cfg, LOGGER)
     save_config(cfg, LOGGER)

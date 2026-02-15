@@ -48,6 +48,8 @@ def main(
         user_name (str, optional): kaggleのユーザー名.
         new (bool, optional): 新規データセットとしてアップロードするかどうか.
     """
+    if "_" in title:
+        title = title.replace("_", "-")
     tmp_dir = Path("./tmp")
     tmp_dir.mkdir(parents=True, exist_ok=True)
 
