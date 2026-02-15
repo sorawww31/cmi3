@@ -15,5 +15,5 @@ optimizer_name: "adamw"
 warmup_epochs: 10
 rnn_num_layers: 2
 branch_hidden_multiplier: 2
-features: ["imu", "rot", "angular_vel", "jerk", "magnitude"]
+features: ["imu", "rot", "angular_vel", "jerk", "magnitude", "thm"]
 patience: 20

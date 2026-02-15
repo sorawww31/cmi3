@@ -8,14 +8,24 @@ This module provides:
 """
 
 from dataclasses import dataclass
+from typing import Literal
+
+PoolType = Literal["max", "avg"]
 
 
 @dataclass
 class FeatureGroup:
-    """特徴量グループの定義"""
+    """特徴量グループの定義
+
+    Attributes:
+        name: グループ名
+        columns: カラム名リスト
+        pool_type: Poolingの種類 ("max" or "avg")
+    """
 
     name: str
     columns: list[str]
+    pool_type: PoolType = "max"
 
 
 # ============================================================================
@@ -25,50 +35,60 @@ class FeatureGroup:
 
 FEATURE_GROUPS: dict[str, FeatureGroup] = {
     "rot": FeatureGroup(
-        "rot",
-        ["rot_x", "rot_y", "rot_z", "rot_w", "rot_angle", "rot_angle_vel"],  # , "roll", "pitch", "yaw"]
+        name="rot",
+        columns=["rot_x", "rot_y", "rot_z", "rot_w", "rot_angle", "rot_angle_vel"],
+        pool_type="max",
     ),
     "euler": FeatureGroup(
-        "euler",
-        ["roll", "pitch", "yaw"],
+        name="euler",
+        columns=["roll", "pitch", "yaw"],
+        pool_type="max",
     ),
     "imu": FeatureGroup(
-        "imu",
-        [
+        name="imu",
+        columns=[
             "linear_acc_x",
             "linear_acc_y",
             "linear_acc_z",
         ],
+        pool_type="max",
     ),
     "jerk": FeatureGroup(
-        "jerk",
-        [
+        name="jerk",
+        columns=[
             "jerk_x",
             "jerk_y",
             "jerk_z",
         ],
+        pool_type="avg",  # Jerk uses AvgPooling1d
     ),
     "angular_vel": FeatureGroup(
-        "angular_vel",
-        [
+        name="angular_vel",
+        columns=[
             "angular_vel_x",
             "angular_vel_y",
             "angular_vel_z",
             "angular_dist",
         ],
+        pool_type="max",
     ),
     "magnitude": FeatureGroup(
-        "magnitude",
-        [
+        name="magnitude",
+        columns=[
             "acc_mag",
             "linear_acc_mag",
             "angular_vel_mag",
             "jerk_mag",
         ],
+        pool_type="max",
     ),
-    "thm": FeatureGroup("thm", [f"thm_{i}" for i in range(1, 6)]),
+    "thm": FeatureGroup(
+        name="thm", columns=[f"thm_{i}" for i in range(1, 6)], pool_type="max"
+    ),
     "tof": FeatureGroup(
-        "tof", [f"tof_{i}_v{j}" for i in range(1, 6) for j in range(64)]
+        name="tof",
+        columns=[f"tof_{i}_v{j}" for i in range(1, 6) for j in range(64)],
+        pool_type="max",
     ),
 }
 
@@ -119,15 +139,28 @@ def build_branch_configs(
 
         group = FEATURE_GROUPS[name]
         num_ch = len(group.columns)
-        configs.append(
-            BranchConfig(
-                name=group.name,
-                columns=group.columns,
-                hidden_channels=[
-                    num_ch * hidden_multiplier,
-                    num_ch * hidden_multiplier * 2,
-                    num_ch * hidden_multiplier * 4,
-                ],
+
+        if name == "tof":
+            # ToFBranch用: Conv3Dのチャネル数 (5sensors → 32 → 64)
+            configs.append(
+                BranchConfig(
+                    name=group.name,
+                    columns=group.columns,
+                    hidden_channels=[32, 64],
+                    pool_type=group.pool_type,
+                )
             )
-        )
+        else:
+            configs.append(
+                BranchConfig(
+                    name=group.name,
+                    columns=group.columns,
+                    hidden_channels=[
+                        num_ch * hidden_multiplier,
+                        num_ch * hidden_multiplier * 2,
+                        num_ch * hidden_multiplier * 4,
+                    ],
+                    pool_type=group.pool_type,
+                )
+            )
     return configs

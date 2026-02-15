@@ -87,7 +87,7 @@ def preconvert_sequences(
     sequence_ids: list[int],
     sensor_cols: list[str],
     max_length: int,
-) -> tuple[np.ndarray, dict[int, dict]]:
+) -> tuple[np.ndarray, np.ndarray, dict[int, dict]]:
     """
     DataFrameから全シーケンスをNumPy配列に事前変換（メモリ効率化）
 
@@ -99,6 +99,7 @@ def preconvert_sequences(
 
     Returns:
         data_array: (n_sequences, max_length, n_features) のNumPy配列
+        lengths: (n_sequences,) の有効なシーケンス長配列
         metadata: シーケンスIDをキーとするメタデータ辞書
     """
     n_sequences = len(sequence_ids)
@@ -106,6 +107,7 @@ def preconvert_sequences(
 
     # 事前にメモリを確保
     data_array = np.zeros((n_sequences, max_length, n_features), dtype=np.float32)
+    lengths = np.zeros(n_sequences, dtype=np.int32)
     metadata = {}
 
     # sequence_idでグループ化して効率的にアクセス
@@ -115,6 +117,7 @@ def preconvert_sequences(
         if seq_id in grouped.groups:
             seq_df = grouped.get_group(seq_id)
             seq_data = seq_df[sensor_cols].values.astype(np.float32)
+            original_len = len(seq_data)
 
             # 欠損値を0で埋める
             seq_data = np.nan_to_num(seq_data, nan=0.0)
@@ -122,6 +125,9 @@ def preconvert_sequences(
             # パディング
             seq_data = pad_sequence(seq_data, max_length)
             data_array[idx] = seq_data
+
+            # 有効長を保存（max_lengthを超えない）
+            lengths[idx] = min(original_len, max_length)
 
             # メタデータを保存
             first_row = seq_df.iloc[0]
@@ -132,7 +138,76 @@ def preconvert_sequences(
                 "idx": idx,  # 配列内のインデックス
             }
 
-    return data_array, metadata
+    return data_array, lengths, metadata
+
+
+class SequenceScaler:
+    """
+    パディング済み3D配列用のScaler
+
+    パディング部分を無視して平均・標準偏差を計算し、
+    正規化後にパディング部分を0に戻す
+    """
+
+    def __init__(self):
+        self.mean_: np.ndarray | None = None
+        self.std_: np.ndarray | None = None
+        self.fitted_ = False
+
+    def fit(self, X: np.ndarray, lengths: np.ndarray) -> "SequenceScaler":
+        """
+        有効なデータのみを使って平均・標準偏差を計算
+
+        Args:
+            X: (N, T, F) のパディング済み配列
+            lengths: (N,) の有効シーケンス長
+        """
+        valid_values = []
+        max_len = X.shape[1]
+
+        for i, length in enumerate(lengths):
+            if length > 0:
+                # 前方パディング: データは末尾にある
+                valid_values.append(X[i, max_len - length :, :])
+
+        all_values = np.concatenate(valid_values, axis=0)
+        self.mean_ = np.mean(all_values, axis=0)
+        self.std_ = np.std(all_values, axis=0)
+        self.std_[self.std_ < 1e-9] = 1.0  # ゼロ除算防止
+        self.fitted_ = True
+        return self
+
+    def transform(self, X: np.ndarray, lengths: np.ndarray) -> np.ndarray:
+        """
+        正規化を適用し、パディング部分を0に戻す
+
+        Args:
+            X: (N, T, F) のパディング済み配列
+            lengths: (N,) の有効シーケンス長
+
+        Returns:
+            正規化済み配列
+        """
+        if not self.fitted_:
+            raise RuntimeError("Scaler has not been fitted. Call fit() first.")
+
+        X_scaled = (X - self.mean_) / self.std_
+        max_len = X.shape[1]
+
+        # パディング部分を0に戻す
+        for i, length in enumerate(lengths):
+            if length < max_len:
+                pad_len = max_len - length
+                X_scaled[i, :pad_len, :] = 0.0
+
+        return X_scaled
+
+    def fit_transform(self, X: np.ndarray, lengths: np.ndarray) -> np.ndarray:
+        """
+        fitとtransformを同時に実行
+        """
+        self.fit(X, lengths)
+        return self.transform(X, lengths)
 
 
 class CMIDataset(Dataset):
@@ -341,22 +416,28 @@ def create_dataloaders(
     val_df = df[df["sequence_id"].isin(val_ids)]
 
     # 2. 前処理: trainでfit、valはtransformのみ（データリーク防止）
-    preprocessor = Preprocessor()
+    # スケーリングはパディング後に行うため、ここではOFF
+    preprocessor = Preprocessor(apply_scaling=False)
     train_df_processed = preprocessor.fit_transform(train_df)
     val_df_processed = preprocessor.transform(val_df)
 
-    # 3. 前処理済みデータをNumPy配列に変換
-    train_data, train_metadata = preconvert_sequences(
+    # 3. 前処理済みデータをNumPy配列に変換（パディング適用）
+    train_data, train_lengths, train_metadata = preconvert_sequences(
         train_df_processed, train_ids, sensor_cols, max_length
     )
-    val_data, val_metadata = preconvert_sequences(
+    val_data, val_lengths, val_metadata = preconvert_sequences(
         val_df_processed, val_ids, sensor_cols, max_length
     )
 
-    # 4. DataFrameへの参照を解放（メモリ節約）
+    # 4. パディング後にスケーリングを適用
+    scaler = SequenceScaler()
+    train_data = scaler.fit_transform(train_data, train_lengths)
+    val_data = scaler.transform(val_data, val_lengths)
+
+    # 5. DataFrameへの参照を解放（メモリ節約）
     del train_df, val_df, train_df_processed, val_df_processed
 
-    # 5. Dataset作成
+    # 6. Dataset作成
     # Augmentation definition
     train_transforms = Compose(
         [
@@ -390,6 +471,7 @@ def create_dataloaders(
         mixup_alpha=0.0,
         cutmix_alpha=0.0,
         mixup_rate=0.0,
+        transforms=None,
     )
 
     train_loader = DataLoader(

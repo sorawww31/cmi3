@@ -6,6 +6,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+PoolType = Literal["max", "avg"]
+
 
 @dataclass
 class BranchConfig:
@@ -16,7 +18,8 @@ class BranchConfig:
         columns: List of column names for this branch (e.g., ['acc_x', 'acc_y', 'acc_z'])
         hidden_channels: List of hidden channel sizes for each Conv1D layer
         kernel_size: Kernel size for Conv1D layers
-        pool_size: Pooling size for AvgPool1d layers between Conv blocks
+        pool_size: Pooling size for pooling layers between Conv blocks
+        pool_type: Type of pooling ("max" or "avg")
     """
 
     name: str
@@ -24,6 +27,7 @@ class BranchConfig:
     hidden_channels: list[int] = field(default_factory=lambda: [16, 32, 64])
     kernel_size: int = 3
     pool_size: int = 2
+    pool_type: PoolType = "max"
 
     @property
     def input_channels(self) -> int:
@@ -89,6 +93,7 @@ class ResidualSECNNBlock(nn.Module):
         out_channels,
         kernel_size,
         pool_size=2,
+        pool_type: PoolType = "max",
         dropout=0.3,
         weight_decay=1e-4,
     ):
@@ -108,8 +113,13 @@ class ResidualSECNNBlock(nn.Module):
                 nn.Conv1d(in_channels, out_channels, 1, bias=False),
                 nn.BatchNorm1d(out_channels),
             )
+
+        # Create pooling layer based on pool_type
         if pool_size > 1:
-            self.pool = nn.MaxPool1d(pool_size)
+            if pool_type == "avg":
+                self.pool = nn.AvgPool1d(pool_size)
+            else:  # default: "max"
+                self.pool = nn.MaxPool1d(pool_size)
         else:
             self.pool = nn.Identity()
         self.dropout = nn.Dropout(dropout)
@@ -230,13 +240,18 @@ class IMUBranch(nn.Module):
 
         self.encoder = nn.Sequential(
             ResidualSECNNBlock(
-                in_ch, config.hidden_channels[0], config.kernel_size, pool_size=0
+                in_ch,
+                config.hidden_channels[0],
+                config.kernel_size,
+                pool_size=0,
+                pool_type=config.pool_type,
             ),
             ResidualSECNNBlock(
                 config.hidden_channels[0],
                 config.hidden_channels[1],
                 config.kernel_size,
                 pool_size=2,
+                pool_type=config.pool_type,
             ),
             # nn.Dropout1d(p=0.2),
         )
@@ -255,6 +270,85 @@ class IMUBranch(nn.Module):
             Encoded tensor of shape (Batch, output_channels, Time')
         """
         return self.encoder(x)
+
+
+class ToFBranch(nn.Module):
+    """ToFセンサーデータ用のConv3Dブランチ
+
+    5つのToFセンサー(各8x8グリッド)を3Dボリュームとして処理する。
+
+    Input shape:  (Batch, 320, Time) — 5sensors × 64pixels のフラット表現
+    Internal:     (Batch, 5, Time, 8, 8) — sensors=channels, time=depth, 8x8=spatial
+    Output shape: (Batch, output_channels, Time') — 他ブランチと同じ形式
+
+    Args:
+        config: BranchConfig with hidden_channels=[32, 64]
+    """
+
+    NUM_SENSORS = 5
+    GRID_H = 8
+    GRID_W = 8
+
+    def __init__(self, config: BranchConfig):
+        super().__init__()
+        self.config = config
+        pool_size = config.pool_size
+
+        # Conv3D Layer 1: 5ch → 32ch
+        ch1 = config.hidden_channels[0]  # 32
+        self.conv1 = nn.Conv3d(
+            self.NUM_SENSORS, ch1, kernel_size=3, padding=1, bias=False
+        )
+        self.bn1 = nn.BatchNorm3d(ch1)
+
+        # Conv3D Layer 2: 32ch → 64ch
+        ch2 = config.hidden_channels[1]  # 64
+        self.conv2 = nn.Conv3d(ch1, ch2, kernel_size=3, padding=1, bias=False)
+        self.bn2 = nn.BatchNorm3d(ch2)
+
+        # Spatial pooling: H,W を圧縮、Timeは pool_size で縮小
+        # 出力: (B, ch2, T//pool_size, 1, 1)
+        self.pool = nn.AdaptiveAvgPool3d(output_size=None)  # placeholder
+        self._pool_size = pool_size
+        self.dropout = nn.Dropout(0.3)
+
+    @property
+    def output_channels(self) -> int:
+        return self.config.hidden_channels[-1]  # 64
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x: (Batch, 320, Time) — 5sensors × 64pixels flattened
+        Returns:
+            (Batch, output_channels, Time') where Time' = Time // pool_size
+        """
+        B, C, T = x.shape
+
+        # (B, 320, T) → (B, 5, 64, T) → (B, 5, T, 8, 8)
+        x = x.view(B, self.NUM_SENSORS, self.GRID_H * self.GRID_W, T)
+        x = x.permute(0, 1, 3, 2)  # (B, 5, T, 64)
+        x = x.view(B, self.NUM_SENSORS, T, self.GRID_H, self.GRID_W)
+
+        # Conv3D Block 1
+        x = self.conv1(x)
+        x = self.bn1(x)
+        x = F.relu(x)
+
+        # Conv3D Block 2
+        x = self.conv2(x)
+        x = self.bn2(x)
+        x = F.relu(x)
+
+        # Adaptive pooling: 空間(H,W)を1に圧縮、Time次元はpool_sizeで縮小
+        T_out = max(1, T // self._pool_size)
+        x = F.adaptive_avg_pool3d(x, (T_out, 1, 1))  # (B, ch2, T_out, 1, 1)
+
+        # (B, ch2, T_out, 1, 1) → (B, ch2, T_out)
+        x = x.squeeze(-1).squeeze(-1)
+        x = self.dropout(x)
+
+        return x
 
 
 class MLPHead(nn.Module):
@@ -388,8 +482,11 @@ class CMIModel(nn.Module):
         # --- 1. Feature Branch Encoders ---
         self.branches = nn.ModuleDict()
         for cfg in branch_configs:
-            # Use IMUBranch for all feature groups
-            self.branches[cfg.name] = IMUBranch(cfg)
+            if cfg.name == "tof":
+                self.branches[cfg.name] = ToFBranch(cfg)
+            else:
+                # Use IMUBranch for all other feature groups
+                self.branches[cfg.name] = IMUBranch(cfg)
 
         total_encoder_channels = sum(
             branch.output_channels for branch in self.branches.values()
