@@ -11,6 +11,7 @@ class ExpConfig:
     seed: int = 42
     folds: list = field(default_factory=lambda: [0, 1, 2, 3, 4])
     n_folds: int = 5
+    cv_strategy: str = "gkf"  # gkf (GroupKFold) or sgkf (StratifiedGroupKFold)
 
     # Wandb
     wandb_project_name: Optional[str] = os.getenv("COMPETITION", "cmi3")

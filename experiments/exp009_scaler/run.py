@@ -17,7 +17,7 @@ from dotenv import load_dotenv
 from hydra.core.config_store import ConfigStore
 from hydra.core.hydra_config import HydraConfig
 from omegaconf import OmegaConf
-from sklearn.model_selection import StratifiedGroupKFold
+from sklearn.model_selection import GroupKFold, StratifiedGroupKFold
 
 import wandb
 
@@ -97,18 +97,23 @@ def prepare_fold_splits(
     df: pd.DataFrame,
     n_folds: int = 5,
     seed: int = 0,
+    cv_strategy: str = "gkf",
 ) -> list[tuple[np.ndarray, np.ndarray]]:
-    """StratifiedGroupKFoldでsubject毎にfold分割（gesture分布を均等化）"""
-    # シーケンス毎の情報を取得
+    """subject毎にfold分割。gkf=GroupKFold, sgkf=StratifiedGroupKFold"""
     seq_info = df.groupby("sequence_id").first().reset_index()
     sequence_ids = seq_info["sequence_id"].values
     subjects = seq_info["subject"].values
-    gestures = seq_info["gesture"].values  # 層化の対象
 
-    sgkf = StratifiedGroupKFold(n_splits=n_folds, shuffle=True, random_state=seed)
+    if cv_strategy == "sgkf":
+        gestures = seq_info["gesture"].values
+        kf = StratifiedGroupKFold(n_splits=n_folds, shuffle=True, random_state=seed)
+        split_iter = kf.split(sequence_ids, y=gestures, groups=subjects)
+    else:  # gkf
+        kf = GroupKFold(n_splits=n_folds)
+        split_iter = kf.split(sequence_ids, groups=subjects)
 
     splits = []
-    for train_idx, val_idx in sgkf.split(sequence_ids, y=gestures, groups=subjects):
+    for train_idx, val_idx in split_iter:
         train_seq_ids = sequence_ids[train_idx].tolist()
         val_seq_ids = sequence_ids[val_idx].tolist()
         splits.append((train_seq_ids, val_seq_ids))
@@ -171,7 +176,9 @@ def main(cfg: Config) -> None:
 
     # Prepare fold splits
     LOGGER.info("Preparing fold splits...")
-    splits = prepare_fold_splits(train_df, cfg.exp.n_folds, seed=cfg.exp.seed)
+    splits = prepare_fold_splits(
+        train_df, cfg.exp.n_folds, seed=cfg.exp.seed, cv_strategy=cfg.exp.cv_strategy
+    )
 
     # Get sensor columns from group definitions
     if cfg.exp.features is not None:
@@ -200,7 +207,7 @@ def main(cfg: Config) -> None:
         # Create dataloaders
         LOGGER.info("Creation Dataloders")
         with trace("create_dataloaders"):
-            train_loader, val_loader = create_dataloaders(
+            train_loader, val_loader, scaler = create_dataloaders(
                 train_df,
                 train_ids,
                 val_ids,
@@ -212,6 +219,11 @@ def main(cfg: Config) -> None:
                 cutmix_alpha=cfg.exp.cutmix_alpha,
                 mixup_rate=cfg.exp.mixup_rate,
             )
+
+        # Save fold-specific scaler for inference consistency
+        scaler_path = Path(output_dir) / f"scaler_fold{fold}.npz"
+        scaler.save(scaler_path)
+        LOGGER.info(f"Saved scaler to {scaler_path}")
 
         # Create model
         LOGGER.info("Creation CMIModel")

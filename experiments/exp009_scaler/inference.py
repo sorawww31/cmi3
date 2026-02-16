@@ -4,8 +4,8 @@ Uses kaggle_evaluation.cmi_inference_server for Code Competition submission.
 
 Usage:
     - Kaggle notebook上で実行する
-    - /kaggle/input/XXX にソースコード一式 (experiments/exp007_scale/) が格納
-    - /kaggle/input/YYY/{MODEL_VERSION} にモデル + config.yaml が格納
+    - /kaggle/input/XXX にソースコード一式 (experiments/exp009_scaler/) が格納
+    - /kaggle/input/YYY/{MODEL_VERSION} にモデル + config.yaml + scaler_fold*.npz が格納
 """
 
 import os
@@ -21,7 +21,7 @@ import yaml
 # ==============================================================================
 # ユーザー設定（ここだけ変更する）
 # ==============================================================================
-DATASETS = "/kaggle/input/datasets/sorawww31/exp008-sub"
+DATASETS = "/kaggle/input/datasets/sorawww31/exp009-scaler"
 SRC_DATASET = f"{DATASETS}/experiments"  # ソースコード用データセット名
 MODEL_DATASET = f"{DATASETS}/output"  # モデル用データセット名
 MODEL_VERSION = "013"  # モデルバージョン
@@ -59,34 +59,27 @@ max_length = cfg["max_length"]
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # ==============================================================================
-# 訓練データから Preprocessor & Scaler を再構築（訓練時と同一のデータフロー）
+# Preprocessor を訓練データから構築（前処理パイプラインの再現）
 # ==============================================================================
-print("Building preprocessor and scaler from training data...")
+print("Building preprocessor from training data...")
 train_df = pd.read_csv(DATA_DIR / "train.csv")
 
-# 1. Preprocessor: trainでfit_transform（スケーリングはOFF = 訓練時と同一）
 preprocessor = Preprocessor(apply_scaling=False)
-train_df_processed = preprocessor.fit_transform(train_df)
+preprocessor.fit_transform(train_df)
+# fit_transform で内部パラメータを学習、以降は transform のみ使用
 
-# 2. preconvert_sequences: 全trainシーケンスをpad + nan_to_num
-all_train_ids = train_df_processed["sequence_id"].unique().tolist()
-train_data, train_lengths, _ = preconvert_sequences(
-    train_df_processed, all_train_ids, sensor_cols, max_length
-)
-
-# 3. SequenceScaler: trainでfit
-scaler = SequenceScaler()
-scaler.fit(train_data, train_lengths)
-
-del train_df, train_df_processed, train_data, train_lengths, all_train_ids
-print("Preprocessor and scaler ready.")
+del train_df
+print("Preprocessor ready.")
 
 # ==============================================================================
-# 5-Foldモデルのロード
+# 5-Foldモデル + fold毎のScalerをロード
 # ==============================================================================
-print("Loading models...")
+print("Loading models and per-fold scalers...")
 models = []
+scalers = []
+
 for fold in cfg.get("folds", [0, 1, 2, 3, 4]):
+    # Model
     model = get_model(
         model_name=cfg["model_name"],
         num_classes=num_classes,
@@ -111,7 +104,13 @@ for fold in cfg.get("folds", [0, 1, 2, 3, 4]):
     model.eval()
     models.append(model)
 
-print(f"Loaded {len(models)} models.")
+    # Scaler: fold毎に保存されたパラメータをロード
+    scaler_path = MODEL_DIR / f"scaler_fold{fold}.npz"
+    scaler = SequenceScaler.load(scaler_path)
+    scalers.append(scaler)
+    print(f"  Fold {fold}: model + scaler loaded")
+
+print(f"Loaded {len(models)} models with per-fold scalers.")
 
 
 # ==============================================================================
@@ -124,7 +123,7 @@ def predict(sequence: pl.DataFrame, demographics: pl.DataFrame) -> str:
     データフロー（create_dataloaders と同一）:
         1. preprocessor.transform() で前処理
         2. preconvert_sequences() で nan_to_num + pad_sequence
-        3. scaler.transform() でスケーリング
+        3. fold毎のscaler.transform() でスケーリング（訓練時と完全一致）
     """
     # Polars → Pandas変換
     seq_pd = sequence.to_pandas()
@@ -141,20 +140,17 @@ def predict(sequence: pl.DataFrame, demographics: pl.DataFrame) -> str:
         seq_processed, [dummy_seq_id], sensor_cols, max_length
     )
 
-    # 3. スケーリング（fit済みscalerでtransformのみ）
-    data_array = scaler.transform(data_array, lengths)
+    # 3. 各fold: fold固有のscalerでスケーリング → fold固有のモデルで推論
+    all_probs = []
+    for model, scaler in zip(models, scalers):
+        scaled_data = scaler.transform(data_array.copy(), lengths)
+        input_tensor = torch.from_numpy(scaled_data).to(DEVICE)
+        probs = torch.softmax(model(input_tensor), dim=1)
+        all_probs.append(probs)
 
-    # Tensor化 → 推論
-    input_tensor = torch.from_numpy(data_array).to(
-        DEVICE
-    )  # (1, max_length, n_features)
-
-    # 5-Fold Ensemble（softmax確率の平均）
-    probs = torch.stack(
-        [torch.softmax(model(input_tensor), dim=1) for model in models]
-    ).mean(dim=0)
-
-    pred_idx = torch.argmax(probs, dim=1).item()
+    # softmax確率の平均でアンサンブル
+    avg_probs = torch.stack(all_probs).mean(dim=0)
+    pred_idx = torch.argmax(avg_probs, dim=1).item()
     return IDX_TO_GESTURE[pred_idx]
 
 

@@ -369,6 +369,7 @@ class MLPHead(nn.Module):
             layers.extend(
                 [
                     nn.Linear(prev_ch, hidden_ch),
+                    nn.BatchNorm1d(hidden_ch),
                     nn.ReLU(),
                     nn.Dropout(p=dropout),
                 ]
@@ -492,6 +493,7 @@ class CMIModel(nn.Module):
             branch.output_channels for branch in self.branches.values()
         )
         self.se = SEBlock(total_encoder_channels)
+        self.branch_dropout = nn.Dropout(0.15)
         # --- 2. Sequence Modeling Layer (RNN or Transformer) ---
         if self.rnn_type == "transformer":
             # Transformerには固定のd_modelが必要なので、ブランチ出力を射影する層を追加
@@ -558,6 +560,8 @@ class CMIModel(nn.Module):
 
         # Concatenate all branch outputs along channel dimension
         x = torch.cat(encoded_features, dim=1)  # (Batch, total_channels, Time')
+        x = self.se(x)
+        x = self.branch_dropout(x)
 
         # --- 2. Sequence Modeling ---
         # (Batch, total_channels, Time') -> (Batch, Time', total_channels)

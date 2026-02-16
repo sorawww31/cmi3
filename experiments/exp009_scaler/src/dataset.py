@@ -207,6 +207,22 @@ class SequenceScaler:
         self.fit(X, lengths)
         return self.transform(X, lengths)
 
+    def save(self, path: str | Path) -> None:
+        """スケーラーのパラメータをファイルに保存"""
+        if not self.fitted_:
+            raise RuntimeError("Scaler has not been fitted. Call fit() first.")
+        np.savez(str(path), mean=self.mean_, std=self.std_)
+
+    @classmethod
+    def load(cls, path: str | Path) -> "SequenceScaler":
+        """ファイルからスケーラーのパラメータを復元"""
+        data = np.load(str(path))
+        scaler = cls()
+        scaler.mean_ = data["mean"]
+        scaler.std_ = data["std"]
+        scaler.fitted_ = True
+        return scaler
+
 
 class CMIDataset(Dataset):
     """
@@ -487,4 +503,4 @@ def create_dataloaders(
         pin_memory=True,
     )
 
-    return train_loader, val_loader
+    return train_loader, val_loader, scaler
