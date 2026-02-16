@@ -69,16 +69,16 @@ def pad_sequence(
     max_length: int,
     pad_value: float = 0.0,
 ) -> np.ndarray:
-    """シーケンスをmax_lengthにパディング（前方パディング）または切り詰め"""
+    """シーケンスをmax_lengthにパディング（後方パディング）または切り詰め"""
     seq_len, n_features = data.shape
 
     if seq_len >= max_length:
-        # 長い場合は末尾を使用（最新のデータを保持）
-        return data[-max_length:]
+        # 長い場合は先頭を使用
+        return data[:max_length]
 
-    # 前方パディング: [PAD, PAD, ..., data]
+    # 後方パディング: [data, PAD, PAD, ...]
     padded = np.full((max_length, n_features), pad_value, dtype=np.float32)
-    padded[-seq_len:] = data  # データを末尾に配置
+    padded[:seq_len] = data  # データを先頭に配置
     return padded
 
 
@@ -163,12 +163,11 @@ class SequenceScaler:
             lengths: (N,) の有効シーケンス長
         """
         valid_values = []
-        max_len = X.shape[1]
 
         for i, length in enumerate(lengths):
             if length > 0:
-                # 前方パディング: データは末尾にある
-                valid_values.append(X[i, max_len - length :, :])
+                # 後方パディング: データは先頭にある
+                valid_values.append(X[i, :length, :])
 
         all_values = np.concatenate(valid_values, axis=0)
         self.mean_ = np.mean(all_values, axis=0)
@@ -197,8 +196,7 @@ class SequenceScaler:
         # パディング部分を0に戻す
         for i, length in enumerate(lengths):
             if length < max_len:
-                pad_len = max_len - length
-                X_scaled[i, :pad_len, :] = 0.0
+                X_scaled[i, length:, :] = 0.0
 
         return X_scaled
 
@@ -443,9 +441,9 @@ def create_dataloaders(
         [
             OneOf(
                 [
-                    GaussianNoise(p=0.1, max_noise_amplitude=0.05),
-                    PinkNoiseSNR(p=0.1, min_snr=4.0, max_snr=20.0),
-                    ButterFilter(p=0.1),
+                    GaussianNoise(p=0.0, max_noise_amplitude=0.05),
+                    PinkNoiseSNR(p=0.0, min_snr=4.0, max_snr=20.0),
+                    ButterFilter(p=0.0),
                 ]
             ),
             TimeShift(p=0.3, padding_mode="zero", max_shift_pct=0.25),

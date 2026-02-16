@@ -10,7 +10,7 @@ weight_decay: 3e-4
 ema_decay: 0.999
 batch_size: 64
 max_length: 96
-rnn_type: "gru"
+rnn_type: "transformer"
 optimizer_name: "radam_schedule_free"
 warmup_epochs: 10
 rnn_num_layers: 2

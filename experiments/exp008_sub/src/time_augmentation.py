@@ -1,4 +1,3 @@
-import colorednoise as cn
 import numpy as np
 from scipy.signal import butter, lfilter
 

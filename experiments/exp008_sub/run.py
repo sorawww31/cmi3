@@ -17,7 +17,7 @@ from dotenv import load_dotenv
 from hydra.core.config_store import ConfigStore
 from hydra.core.hydra_config import HydraConfig
 from omegaconf import OmegaConf
-from sklearn.model_selection import GroupKFold
+from sklearn.model_selection import StratifiedGroupKFold
 
 import wandb
 
@@ -96,18 +96,19 @@ def get_sensor_groups(sensor_type: str) -> list[str]:
 def prepare_fold_splits(
     df: pd.DataFrame,
     n_folds: int = 5,
+    seed: int = 0,
 ) -> list[tuple[np.ndarray, np.ndarray]]:
-    """GroupKFoldでsubject毎にfold分割"""
+    """StratifiedGroupKFoldでsubject毎にfold分割（gesture分布を均等化）"""
     # シーケンス毎の情報を取得
     seq_info = df.groupby("sequence_id").first().reset_index()
     sequence_ids = seq_info["sequence_id"].values
     subjects = seq_info["subject"].values
+    gestures = seq_info["gesture"].values  # 層化の対象
 
-    gkf = GroupKFold(n_splits=n_folds)
+    sgkf = StratifiedGroupKFold(n_splits=n_folds, shuffle=True, random_state=seed)
 
-    # ダミーのyを使用
     splits = []
-    for train_idx, val_idx in gkf.split(sequence_ids, groups=subjects):
+    for train_idx, val_idx in sgkf.split(sequence_ids, y=gestures, groups=subjects):
         train_seq_ids = sequence_ids[train_idx].tolist()
         val_seq_ids = sequence_ids[val_idx].tolist()
         splits.append((train_seq_ids, val_seq_ids))
@@ -170,7 +171,7 @@ def main(cfg: Config) -> None:
 
     # Prepare fold splits
     LOGGER.info("Preparing fold splits...")
-    splits = prepare_fold_splits(train_df, cfg.exp.n_folds)
+    splits = prepare_fold_splits(train_df, cfg.exp.n_folds, seed=cfg.exp.seed)
 
     # Get sensor columns from group definitions
     if cfg.exp.features is not None:
