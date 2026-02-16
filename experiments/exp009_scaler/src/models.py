@@ -94,7 +94,7 @@ class ResidualSECNNBlock(nn.Module):
         kernel_size,
         pool_size=2,
         pool_type: PoolType = "max",
-        dropout=0.3,
+        dropout=0.15,
         weight_decay=1e-4,
     ):
         super().__init__()
@@ -122,7 +122,7 @@ class ResidualSECNNBlock(nn.Module):
                 self.pool = nn.MaxPool1d(pool_size)
         else:
             self.pool = nn.Identity()
-        self.dropout = nn.Dropout(dropout)
+        self.dropout = nn.Dropout1d(dropout)  # Spatial dropout: チャネル単位でドロップ
 
     def forward(self, x):
         shortcut = self.shortcut(x)
@@ -140,9 +140,9 @@ class ResidualSECNNBlock(nn.Module):
         out += shortcut
         out = F.relu(out)
 
-        # Pool and dropout
-        out = self.pool(out)
+        # Spatial dropout (before pool to regularize feature maps)
         out = self.dropout(out)
+        out = self.pool(out)
 
         return out
 
@@ -310,7 +310,7 @@ class ToFBranch(nn.Module):
         # 出力: (B, ch2, T//pool_size, 1, 1)
         self.pool = nn.AdaptiveAvgPool3d(output_size=None)  # placeholder
         self._pool_size = pool_size
-        self.dropout = nn.Dropout(0.3)
+        self.dropout = nn.Dropout1d(0.2)  # Spatial dropout for conv features
 
     @property
     def output_channels(self) -> int:
@@ -371,11 +371,12 @@ class MLPHead(nn.Module):
                     nn.Linear(prev_ch, hidden_ch),
                     nn.BatchNorm1d(hidden_ch),
                     nn.ReLU(),
-                    nn.Dropout(p=dropout),
                 ]
             )
             prev_ch = hidden_ch
 
+        # Dropout once before final linear (separated from BN to avoid variance shift)
+        layers.append(nn.Dropout(p=dropout))
         layers.append(nn.Linear(prev_ch, out_channel))
         self.mlp = nn.Sequential(*layers)
 
@@ -493,7 +494,7 @@ class CMIModel(nn.Module):
             branch.output_channels for branch in self.branches.values()
         )
         self.se = SEBlock(total_encoder_channels)
-        self.branch_dropout = nn.Dropout(0.15)
+        self.branch_dropout = nn.Dropout(0.1)
         # --- 2. Sequence Modeling Layer (RNN or Transformer) ---
         if self.rnn_type == "transformer":
             # Transformerには固定のd_modelが必要なので、ブランチ出力を射影する層を追加
@@ -561,14 +562,14 @@ class CMIModel(nn.Module):
         # Concatenate all branch outputs along channel dimension
         x = torch.cat(encoded_features, dim=1)  # (Batch, total_channels, Time')
         x = self.se(x)
-        x = self.branch_dropout(x)
 
         # --- 2. Sequence Modeling ---
         # (Batch, total_channels, Time') -> (Batch, Time', total_channels)
         x = x.transpose(1, 2)
         if self.rnn_type == "transformer":
-            # Projection -> Positional Encoding -> Transformer
+            # Projection -> Dropout -> Positional Encoding -> Transformer
             x = self.input_proj(x)  # (Batch, Time', d_model)
+            x = self.branch_dropout(x)  # Dropout after projection, before PE
             x = self.pos_encoder(x)
             output = self.sequence_model(x)  # (Batch, Time', d_model)
         else:
